@@ -10,6 +10,16 @@ openspec
 GEMINI.md
 CLAUDE.md
 
+!.ai/
+!.claude/
+!.gemini/
+!.ai/**
+!.claude/**
+!.gemini/**
+!CLAUDE.md
+!GEMINI.md
+!CODEX.md
+
 /include/config.h
 /interface/framework/dstore_io_event.h
 /interface/framework/dstore_wait_state.h

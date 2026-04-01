@@ -350,13 +350,11 @@ void WalStream::FreeWaitPlsnSlots()
 
 void WalStream::NotifySlotLeaderIfNecessary(uint64 slot)
 {
-#ifdef UT
     if (m_plsnWaitSlot[slot].GetPlsnWaiterCount() == 0) {
         return;
     }
-#endif
     std::unique_lock<std::mutex> slotNotifyLock(m_plsnWaitSlot[slot].m_waitMtx);
-    m_plsnWaitSlot[slot].m_waitCv.notify_one();
+    m_plsnWaitSlot[slot].m_waitCv.notify_all();
 }
 
 void WalStream::UpdateNowFlushedPlsn(uint64 &nowFlushedPlsn)
@@ -369,9 +367,7 @@ void WalStream::WaitPlsnSlots(uint64 slot, uint64 targetPlsn, uint64 nowFlushedP
 {
     uint64 retryTime = 0;
     uint8 sleepTime = 10;
-#ifdef UT
     m_plsnWaitSlot[slot].IncreaseWaitCount();
-#endif
     FAULT_INJECTION_NOTIFY(DstoreWalFI::WAIT_PLSN_SLOT);
     while (nowFlushedPlsn < targetPlsn) {
         if (unlikely(thrd->GetCore() == nullptr)) {
@@ -400,9 +396,7 @@ void WalStream::WaitPlsnSlots(uint64 slot, uint64 targetPlsn, uint64 nowFlushedP
             retryTime = 0;
         }
     }
-#ifdef UT
     m_plsnWaitSlot[slot].DecreaseWaitCount();
-#endif
     return;
 }
 
