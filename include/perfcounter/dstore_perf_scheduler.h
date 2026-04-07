@@ -120,8 +120,13 @@ public:
                 ErrLog(DSTORE_INFO, MODULE_FRAMEWORK,
                        ErrMsg("Cancel perfcounter scheduler task[%hhu] failed.", static_cast<uint8>(taskIndex + 1)));
             }
-            m_bgThread[taskIndex]->join();
-            delete m_bgThread[taskIndex];
+            if (m_bgThread[taskIndex] != nullptr) {
+                if (m_bgThread[taskIndex]->joinable()) {
+                    m_bgThread[taskIndex]->join();
+                }
+                delete m_bgThread[taskIndex];
+                m_bgThread[taskIndex] = nullptr;
+            }
         }
     }
 
@@ -165,7 +170,7 @@ private:
 private:
     DstoreMemoryContext m_perfSchedulerMemCtx{nullptr};
     std::atomic<uint8> m_taskCnt{0};
-    bool m_cancelTaskFlag;
+    std::atomic<bool> m_cancelTaskFlag{false};
     uint64 m_taskId[PERF_COUNTER_MAX_TASK_NUM];
     std::thread *m_bgThread[PERF_COUNTER_MAX_TASK_NUM];
 };

@@ -32,7 +32,7 @@ XXX/
 
 ## 1.1 配置Dstore所需依赖库
 
-建议按照上述指定的依赖库版本进行下载和编译，以避免因版本不一致而引发的兼容性问题。
+请按照上述指定的依赖库版本进行下载和编译，以避免因版本不一致而引发的兼容性问题。
 
 ### secure
 **下载地址**：https://gitcode.com/opengauss/openGauss-third_party/tree/master/platform/Huawei_Secure_C
@@ -88,6 +88,7 @@ make -j$(nproc) && make install
 ## 3.2 编译运行tpcctest
 ```
 cd dstore
+rm -rf tmp_build
 mkdir tmp_build && cd tmp_build
 cmake .. -DUTILS_PATH=dstore/utils/output
 make run_dstore_tpcctest

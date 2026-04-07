@@ -69,7 +69,7 @@ private:
 private:
     std::atomic<PerfId> m_catalogIdGenerator{PERF_STAT_INVALID_ID};
     SkipList<PerfId, PerfUnit *> *m_perfUnits{nullptr};
-    DstoreMemoryContext m_perfCatalogMemCtx;
+    DstoreMemoryContext m_perfCatalogMemCtx{nullptr};
     uint32 m_bufferSize{PERF_DUMPBUFFER_INIT_SIZE};
 };
 }  // namespace DSTORE

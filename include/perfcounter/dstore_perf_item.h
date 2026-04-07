@@ -397,7 +397,9 @@ public:
     RangePartitionStat() = default;
     ~RangePartitionStat() override
     {
-        StorageAssert(m_counters != nullptr);
+        if (m_counters != nullptr) {
+            Destroy();
+        }
     }
 
     DISALLOW_COPY_AND_MOVE(RangePartitionStat);
@@ -409,8 +411,13 @@ public:
             return false;
         }
 
+        if (max <= min) {
+            ErrLog(DSTORE_WARNING, MODULE_FRAMEWORK,
+                   ErrMsg("RangePartitionStat init failed. Bucket max is not greater than min."));
+            return false;
+        }
         m_step = (max - min) / bucketNum;
-        if (m_step == 0 || max < min) {
+        if (m_step == 0) {
             ErrLog(DSTORE_WARNING, MODULE_FRAMEWORK,
                    ErrMsg("RangePartitionStat init failed. Bucket step is less than 1."));
             return false;

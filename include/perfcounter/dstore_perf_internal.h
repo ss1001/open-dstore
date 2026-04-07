@@ -225,7 +225,7 @@ constexpr const char *PERFLOG_TIMEPART_NUMERIC_FORMAT<uint64> =
     "avg/min/max=" FMT_U64 "/" FMT_U64 "/" FMT_U64 " cnt=" FMT_U64 "\n";
 template <>
 constexpr const char *PERFLOG_TIMEPART_NUMERIC_FORMAT<int64> =
-    "avg/min/max=" FMT_D64 "/" FMT_D64 "/" FMT_D64 "/" FMT_D64 " cnt=" FMT_U64 "\n";
+    "avg/min/max=" FMT_D64 "/" FMT_D64 "/" FMT_D64 " cnt=" FMT_U64 "\n";
 
 }  // namespace DSTORE
 #endif /* STORAGE_PERF_INTERNAL_H */

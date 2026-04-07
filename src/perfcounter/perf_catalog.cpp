@@ -73,7 +73,9 @@ bool PerfCatalog::RegisterPerfUnit(PerfUnit *perfUnit, PerfId &id)
     id = m_catalogIdGenerator.fetch_add(1);
 
     SkipListErrNo errNo = SkipListErrNo::SUCCESS;
-    ASSERT(m_perfUnits != nullptr); /* PefCatalog uninitialized? */
+    if (unlikely(m_perfUnits == nullptr)) {
+        return false;
+    }
     m_perfUnits->Insert(&errNo, id, perfUnit);
     if (errNo != SkipListErrNo::SUCCESS) {
         ErrLog(DSTORE_ERROR, MODULE_FRAMEWORK,
@@ -153,7 +155,6 @@ bool PerfCatalog::RunDump(uint8 taskIndex)
     if (unlikely(buffer == nullptr)) {
         ErrLog(DSTORE_PANIC,
                MODULE_FRAMEWORK, ErrMsg("Failed to initialize the perfcounter dump buffer space."));
-        return false;
     }
     int32 totalOffset = PerfCatalog::GetInstance().Dump(buffer, taskIndex);
     if (unlikely(totalOffset == PERF_DUMPBUFER_OUT_OF_MEMORY)) {

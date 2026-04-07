@@ -477,7 +477,7 @@ void *DstorePallocExtendedDebug(Size size, uint32 flags, const char *file, int l
 
     if (ret == nullptr) {
         /* If flag has not MCXT_ALLOC_NO_OOM, we must set_error ERROR here */
-        if (unlikely((flags & MCXT_ALLOC_NO_OOM) != 0 && thrd != nullptr && thrd->error != nullptr)) {
+        if (unlikely((flags & MCXT_ALLOC_NO_OOM) == 0 && thrd != nullptr && thrd->error != nullptr)) {
             ErrLog(DSTORE_ERROR, MODULE_FRAMEWORK, ErrMsg("Failed on request of size %lu bytes in %s:%d.",
                 static_cast<unsigned long>(size), file, line));
             return nullptr;
@@ -734,7 +734,7 @@ void DstoreMemcpySafelyForHugeSize(void *dest, size_t destSize, const void *src,
             "memMaxLen %zu", destSize, count, memMaxLen));
         size_t remaining = count;
         size_t copied = 0;
-
+        StorageAssert(count <= destSize);
         while (remaining > 0) {
             size_t chunk_size = remaining > memMaxLen ? memMaxLen : remaining;
             rc = memcpy_s((char*)dest + copied, destSize - copied, (const char*)src + copied, chunk_size);

@@ -173,7 +173,7 @@ public:
         for (uint8 i = 0; i < num; ++i) {
             stats[i] = DstoreNew(m_perfUnitMemCtx) LatencyStat();
             StorageReleasePanic(stats[i] == nullptr, MODULE_BUFMGR, ErrMsg("Alloc memory for stats %hu failed", i));
-            rc = snprintf_s(name, PERF_MAX_NAME_LEN, PERF_MAX_NAME_LEN, "%s%hu", groupName, i);
+            rc = snprintf_s(name, PERF_MAX_NAME_LEN, PERF_MAX_NAME_LEN - 1, "%s%hu", groupName, i);
             storage_securec_check_ss(rc);
             char *dupName = Dstorepstrdup(name);
             if (unlikely(!dupName)) {

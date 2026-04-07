@@ -440,8 +440,9 @@ private:
     int SkipListGetRandomIndexLevel()
     {
         int indexLevel = 0;
+        static thread_local std::mt19937 generator(std::random_device{}());
 
-        while ((rand() & 1) && (indexLevel < (m_maxLevel - 1))) {
+        while ((generator() & 1) && (indexLevel < (m_maxLevel - 1))) {
             indexLevel++;
         }
         return indexLevel;
@@ -461,7 +462,6 @@ private:
     inline void AcquireSkipRdLock(bool autoLock)
     {
         if (autoLock) {
-            ErrLog(DSTORE_ERROR, MODULE_FRAMEWORK, ErrMsg("PerfCounter rd Lock."));
             DstoreLWLockAcquire(&m_rwlock, LW_SHARED);
         }
     }
@@ -469,7 +469,6 @@ private:
     inline void AcquireSkipWrLock(bool autoLock)
     {
         if (autoLock) {
-            ErrLog(DSTORE_ERROR, MODULE_FRAMEWORK, ErrMsg("PerfCounter Wr Lock."));
             DstoreLWLockAcquire(&m_rwlock, LW_EXCLUSIVE);
         }
     }
@@ -477,7 +476,6 @@ private:
     inline void ReleaseSkipLock(bool autoLock)
     {
         if (autoLock) {
-            ErrLog(DSTORE_ERROR, MODULE_FRAMEWORK, ErrMsg("PerfCounter Release Lock."));
             LWLockRelease(&m_rwlock);
         }
     }

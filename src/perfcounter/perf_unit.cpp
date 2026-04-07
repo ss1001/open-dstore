@@ -117,12 +117,8 @@ void PerfUnit::RegisterPerfItem(PerfStatBase *stat, const char *name, PerfLevel 
     stat->SetId(id);
     stat->SetIndentLevel(static_cast<uint8>(m_unitLevel + 1));
 
-    RetStatus errNo = DSTORE_SUCC;
     std::unique_lock<std::mutex> waitLock(m_perfItemsMutex);
     (void)m_perfItems.insert(stat);
-    if (errNo != DSTORE_SUCC) {
-        ErrLog(DSTORE_WARNING, MODULE_FRAMEWORK, ErrMsg("Register PerfItem failed. PerfUnit maybe is unavailable."));
-    }
 }
 
 void PerfUnit::UnRegisterPerfItem(PerfStatBase *stat, PerfLevel level)
