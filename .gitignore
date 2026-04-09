@@ -1,21 +1,30 @@
 .idea
-.claude
-.gemini
-.ai
 .DS_Store
 tmp_build
 output
 openspec
 
+# Local AI/tooling workspaces.
+# Default to ignore, then selectively keep durable project records.
+.codex/
+.claude/
+.gemini/
+.ai/*
+
+# Keep durable AI project docs and local research summaries.
+!.ai/REGISTRY.md
+!.ai/SHARED_RULES.md
+!.ai/summaries/
+!.ai/summaries/**
+
+# Ignore transient AI workspace state.
+.ai/.DS_Store
+.ai/CONTEXT_SNAPSHOT.json
+.ai/exports/
+
+# Keep repo-level assistant docs under version control.
 GEMINI.md
 CLAUDE.md
-
-!.ai/
-!.claude/
-!.gemini/
-!.ai/**
-!.claude/**
-!.gemini/**
 !CLAUDE.md
 !GEMINI.md
 !CODEX.md
