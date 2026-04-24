@@ -8,9 +8,7 @@
 
 ## 1. 现有方案评估 (.ai/summaries)
 
-报告提出的 **A3 (Cacheline 分离)**、**A4 (乐观锁耦合)** 和 **A8 (线程本地 Read Cache)** 是针对 Point Select 热路径的高质量优化，符合现代高性能数据库（如 Umbra, LeanStore）的设计趋势。
-
-*   **A4 (Optimistic Lock Coupling)**: 通过版本号校验代替物理锁，是消除根节点和中间节点锁竞争的标准做法。
+报告提出的 **A3 (Cacheline 分离)** 和 **A8 (线程本地 Read Cache)** 是针对 Point Select 热路径的高质量优化，符合现代高性能数据库（如 Umbra, LeanStore）的设计趋势。
 *   **A8 (Thread-local Cache)**: 进一步消除了 Buffer Pool 的 Pin/Unpin 原子操作，是极致性能的必经之路。
 *   **A3 (BufferDesc 对齐)**: 解决了伪共享问题，确保热点字段在独立缓存行中，减少 CPU 缓存同步开销。
 
@@ -152,9 +150,7 @@
 
 *   **B7: ARM HugePage / TLB 专项优化**: 针对 ARM 平台，对 Buffer Pool 和 Index Metadata 区域使用 2MB HugePage (`MAP_HUGETLB`)，大缓存场景下预期 **+3-8%**。
 *   **B8: Mini-page / Hot Fragment Cache (Bf-Tree)**: 缓存热点叶子页的 mini-page 片段 (~256-512 字节)，命中后直接得到完整记录，彻底绕过 leaf page pin。
-*   **B9: Epoch-protected Metadata (EPVS)**: 把 reader 的共享写动作 (如 Ref count) 彻底挪出快路径，统一在 Epoch 切换时 Reconcile。
-*   **B10: OptiQL 高争用乐观锁**: 极端并发 (256+ 线程) 下 OLC 版本号自旋严重。改用 Queue-based 等待 + 退避策略提升热点对象鲁棒性。
-*   **B11: Learned Upper Directory (VEGA)**: 仅对 B-Tree 的 Root 和上层目录引入学习型索引 (Learned Index) 进行加速。
+*   **B9: Epoch-protected Metadata (EPVS)**: 把 reader 的共享写动作 (如 Ref count) 彻底挪出快路径，统一在 Epoch 切换时 Reconcile。*   **B11: Learned Upper Directory (VEGA)**: 仅对 B-Tree 的 Root 和上层目录引入学习型索引 (Learned Index) 进行加速。
 *   **B12: SmartNIC / DPU 卸载点查**: 将 B-Tree 上层目录直接前移下沉到 NIC/DPU 内，CPU 侧仅在 Cache Miss 时介入。
 
 ---

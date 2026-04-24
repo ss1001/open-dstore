@@ -146,9 +146,12 @@ static ErrorDetails g_index_error_code_map[] = {
         {"INDEX_ERROR_UNCOMMITTED_TUPLE_FOUND_WHEN_BUILDING", "Found uncommitted tuple when building index."},
     [ERROR_GET_CODE(INDEX_ERROR_INVALID_SNAPSHOT_FOR_INDEX_BUILDING)] =
         {"INDEX_ERROR_INVALID_SNAPSHOT_FOR_INDEX_BUILDING", "Snapshot for index building is invalid"},
+    [ERROR_GET_CODE(INDEX_ERROR_POINTGET_UNSUPPORTED)] =
+        {"INDEX_ERROR_POINTGET_UNSUPPORTED", "point-get fast path unsupported index or scan key shape"},
 };
 
-static_assert(sizeof(g_index_error_code_map) != INDEX_ERROR_MAX, "Error code map size doesn't match");
+static_assert(sizeof(g_index_error_code_map) / sizeof(g_index_error_code_map[0]) == INDEX_ERROR_MAX,
+              "Error code map size doesn't match");
 
 } /* namespace DSTORE */
 

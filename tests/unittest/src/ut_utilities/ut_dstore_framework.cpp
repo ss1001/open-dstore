@@ -230,6 +230,7 @@ void DSTORETEST::SetUpTestCase()
     m_guc.rnSleepTimeoutSeconds = 1;
     m_guc.enableRemoteCrConstruction = false;
     m_guc.walKeepTimeAfterRecovery = 0;
+    m_guc.SetEnablePointGetFastPath(true);
     rc = strcpy_s(m_guc.tenantConfig->tenantName, DSTORE_TENANT_NAME_MAX_LEN, "tenant1");
     storage_securec_check(rc, "\0", "\0");
     m_guc.tenantConfig->storeSpaceCnt = 1;
@@ -491,6 +492,7 @@ void DSTOREParamTest<T>::SetUpTestCase()
     m_guc.enableRemoteCrConstruction = false;
     m_guc.walKeepTimeAfterRecovery = 0;
     m_guc.enableStmtTrack = false;
+    m_guc.SetEnablePointGetFastPath(true);
 
     char m_tenantConfigFilePath[MAXPGPATH];
     /* Get tenant config file. */

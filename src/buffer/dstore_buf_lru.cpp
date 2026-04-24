@@ -682,7 +682,7 @@ LruPageClean::LruPageClean(BufLruListArray *lruListArray, uint64 initCandidateLi
 void LruPageClean::Init()
 {
     m_candidateSafePercent = g_storageInstance->GetGuc()->candidateSafePercent;
-    m_lruScanDepth = g_storageInstance->GetGuc()->lruScanDepth;
+    m_lruScanDepth = g_storageInstance->GetGuc()->GetLruScanDepth();
 }
 
 void LruPageClean::StartWorkThreads()

@@ -178,138 +178,9 @@ struct BufferDesc {
 
 ---
 
-### A4: Optimistic Lock Coupling (B-Tree 读路径)
-
-**问题**: `SearchBtreeFromInternalPage()` 在每一层都持有 `contentLwLock (LW_SHARED)`。所有并发 reader 竞争同一 root page 的 LWLock。
-
-**当前代码** (`src/index/dstore_btree_scan.cpp:2243-2307`):
-```cpp
-// 悲观路径: 每层 lock → search → unlock+unpin → pin+lock 下一层
-while (*leafBuf != INVALID_BUFFER_DESC) {
-    StepRightIfNeeded(leafBuf, LW_SHARED, ...);
-    pagePayload.InitByBuffDesc(*leafBuf);
-    if (pagePayload.IsLeaf()) return SUCC;
-    
-    childOffset = BinarySearchOnPage(pagePayload.GetPage(), ...);
-    childPage = GetLowlevelIndexpageLink(childOffset);
-    *leafBuf = ReleaseOldGetNewBuf(*leafBuf, childPage, LW_SHARED);  // unlock old + lock new
-}
-```
-
-**乐观路径设计**:
-
-#### Step 1: 添加 Version Counter
-
-```cpp
-// 在 BtrPage header 中添加
-struct BtrPageLinkAndStatus {
-    // ... 现有字段 ...
-    gs_atomic_uint64 pageVersion;  // +8B, 每次页面修改时递增
-};
-```
-
-#### Step 2: 乐观读遍历
-
-```cpp
-RetStatus BtreeScan::SearchBtreeOptimistic(BufferDesc **leafBuf, bool strictlyGreaterThanKey)
-{
-    // 获取 root page — 仍需 pin（保证页面不被淘汰）但不加 content lock
-    if (STORAGE_FUNC_FAIL(GetRoot(leafBuf, false))) return DSTORE_FAIL;
-    
-    int restartCount = 0;
-restart:
-    if (++restartCount > 3) {
-        // 多次重试失败，回退到悲观路径
-        return SearchBtreeFromInternalPage(*leafBuf, leafBuf, strictlyGreaterThanKey);
-    }
-    
-    BufferDesc *buf = *leafBuf;
-    while (buf != INVALID_BUFFER_DESC) {
-        BtrPage *page = static_cast<BtrPage *>(buf->GetPage(false));  // 无锁读
-        uint64 v1 = page->GetLinkAndStatus()->pageVersion.load(std::memory_order_acquire);
-        
-        // 检查页面是否正在被修改
-        if (v1 & PAGE_LOCKED_BIT) {
-            // Writer 正在修改，回退悲观
-            goto restart;
-        }
-        
-        if (page->GetLinkAndStatus()->TestType(BtrPageType::LEAF_PAGE)) {
-            // 到达叶子页 — 加 LW_SHARED lock 做精确读
-            m_bufMgr->LockContent(buf, LW_SHARED);
-            uint64 v2 = page->GetLinkAndStatus()->pageVersion.load(std::memory_order_acquire);
-            if (v1 != v2) {
-                m_bufMgr->UnlockContent(buf);
-                goto restart;
-            }
-            *leafBuf = buf;
-            return DSTORE_SUCC;
-        }
-        
-        // Internal page: 无锁二分查找
-        OffsetNumber childOffset = BinarySearchOnPage(page, strictlyGreaterThanKey);
-        IndexTuple *childTuple = page->GetIndexTuple(childOffset);
-        PageId childPage = childTuple->GetLowlevelIndexpageLink();
-        
-        // 验证读取一致性
-        uint64 v2 = page->GetLinkAndStatus()->pageVersion.load(std::memory_order_acquire);
-        if (v1 != v2) {
-            goto restart;  // 页面被修改，从头开始
-        }
-        
-        // 释放旧页 pin (无需 unlock，因为没加锁)，pin 新页 (无需 lock)
-        m_bufMgr->Release(buf);  // 仅 unpin
-        buf = ReadBtrPageNoLock(childPage);  // 仅 pin，不加 content lock
-        if (STORAGE_VAR_NULL(buf)) return DSTORE_FAIL;
-    }
-    return DSTORE_FAIL;
-}
-```
-
-#### Step 3: Writer 端配合
-
-```cpp
-// 所有写操作 (insert/delete/split) 修改页面前后:
-void BtrPage::BeginModify() {
-    pageVersion.fetch_or(PAGE_LOCKED_BIT, std::memory_order_acquire);
-}
-void BtrPage::EndModify() {
-    pageVersion.fetch_add(1, std::memory_order_release);  // 清除 LOCKED_BIT + 递增
-    // 注: 假设 PAGE_LOCKED_BIT 是最高位，+1 自然清除它并递增低位
-}
-```
-
-**改动文件清单**:
-
-| 文件 | 改动 |
-|------|------|
-| `include/index/dstore_btree_page.h` | `BtrPageLinkAndStatus` 添加 `pageVersion` |
-| `src/index/dstore_btree_scan.cpp` | 新增 `SearchBtreeOptimistic()` |
-| `src/index/dstore_btree_insert.cpp` | 写路径添加 `BeginModify()/EndModify()` |
-| `src/index/dstore_btree_split.cpp` | split 路径添加 `BeginModify()/EndModify()` |
-| `src/index/dstore_btree_delete.cpp` | delete 路径添加 `BeginModify()/EndModify()` |
-| `include/buffer/dstore_buf_mgr.h` | 添加 `Release()` (仅 unpin 不 unlock) |
-
-**SMO (Split) 处理**:
-- Split 时 parent 和 child 都会递增 version
-- 乐观读者如果在 split 中间读到不一致的 childPage，v2 != v1 触发 restart
-- Restart 代价很低（重新从 root 走一遍），split 频率极低
-
-**风险**: 中。需仔细处理:
-1. `GetPage(false)` 绕过了 content lock 检查（需要新增 bypass 参数）
-2. SMO 期间的边界条件
-3. Recovery/CR page 场景的兼容性
-
-**预期收益**: 高并发 (64+ 线程) 下 **30-50% TPS 提升**。
-**工期**: 1-2 周。
-
----
-
 ### A8: Root/Internal Page Thread-local Read Cache
 
-**前置依赖**: A4 (需要 version counter)
-
-**问题**: 即使用了 A4 的乐观读，root/internal page 仍需 pin（防止被淘汰），pin 仍是原子操作。
+**问题**: root/internal page 反复 pin/unpin 会触发共享状态原子操作，热点索引层级在高并发 point_select 下容易形成 cacheline 流量。
 
 **方案**: 每个线程缓存上层页面内容的本地副本。
 
@@ -354,7 +225,7 @@ struct BTreeTLCache {
 };
 ```
 
-**使用方式** (在 A4 乐观路径中集成):
+**使用方式**:
 
 ```cpp
 RetStatus BtreeScan::SearchBtreeWithTLCache(BufferDesc **leafBuf, bool strictlyGreaterThanKey)
@@ -364,7 +235,7 @@ RetStatus BtreeScan::SearchBtreeWithTLCache(BufferDesc **leafBuf, bool strictlyG
     
     // 尝试从 TL cache 读取 root
     PageId rootPageId = GetBtreeSmgr()->GetRootPageIdFromMetaCache();
-    uint64 rootVersion = /* 从共享 buffer 读取 root 的 version，仅一次原子 load */;
+    uint64 rootVersion = /* 从共享 buffer 读取 root generation 或校验信息 */;
     
     BtrPage *page = cache->Lookup(rootPageId, rootVersion);
     if (page != nullptr) {
@@ -376,10 +247,10 @@ RetStatus BtreeScan::SearchBtreeWithTLCache(BufferDesc **leafBuf, bool strictlyG
         // 继续尝试 internal 层的 TL cache...
         // (类似逻辑)
         
-        // cache miss 或到达叶子层后，走正常的 pin + optimistic read
+        // cache miss 或到达叶子层后，走正常的 pin + read
     } else {
-        // Cache miss: 走 A4 乐观路径，并填充 cache
-        // pin root page, optimistic read, cache->Update(0, rootPageId, version, pageData)
+        // Cache miss: 回退到现有 pin + content lock 路径，并填充 cache
+        // pin root page, read, cache->Update(0, rootPageId, version, pageData)
     }
     
     // 最终叶子页: 必须 pin + LW_SHARED lock
@@ -393,9 +264,9 @@ RetStatus BtreeScan::SearchBtreeWithTLCache(BufferDesc **leafBuf, bool strictlyG
 - 可按需分配 (首次 point_select 时 lazy init)
 
 **缓存失效机制**:
-- 靠 version counter 自然失效，无需主动通知
+- 靠 root/internal page 的 generation 或其他轻量校验信息自然失效，无需主动通知
 - Root/internal page 很少被修改 (只有 split 时)，命中率 >99%
-- 最坏情况: cache miss 回退到 A4 乐观路径，无正确性风险
+- 最坏情况: cache miss 回退到现有 pin + content lock 路径，无正确性风险
 
 **改动文件清单**:
 
@@ -405,9 +276,9 @@ RetStatus BtreeScan::SearchBtreeWithTLCache(BufferDesc **leafBuf, bool strictlyG
 | `include/common/dstore_thread.h` | 线程上下文添加 `BTreeTLCache*` |
 | `src/index/dstore_btree_scan.cpp` | `SearchBtree` 集成 TL cache 逻辑 |
 
-**风险**: 低（在 A4 基础上是纯增量优化，fallback 到 A4 路径即可）。
+**风险**: 中低（需要明确缓存校验信息和失效边界，fallback 到现有路径即可）。
 **预期收益**: 每次 point_select 再减少 **~4 次原子操作** (root+internal 的 pin/unpin)。
-**工期**: ~1 周 (在 A4 完成后)。
+**工期**: ~1 周。
 
 ---
 
@@ -426,19 +297,13 @@ Phase 1 (1-2 天) — 低风险快赢
     ├── 纯字段重排，不改逻辑
     └── 验证 static_assert + 回归测试
 
-Phase 2 (1-2 周) — 核心收益
-└── A4: Optimistic Lock Coupling
-    ├── Week 1: version counter + 乐观读路径
-    ├── Week 2: writer 配合 + SMO 处理 + 测试
-    └── sysbench 64 线程 point_select 对比
-
-Phase 3 (1 周) — 追加收益
+Phase 2 (1 周) — 核心收益
 └── A8: Thread-local Page Cache
-    ├── 依赖 A4 的 version counter
+    ├── 明确 root/internal page generation 或校验信息
     ├── 实现 TL cache + 集成到 SearchBtree
     └── 验证命中率和内存开销
 
-总预期收益 (A3 + A4 + A8 叠加):
+总预期收益 (A3 + A8 叠加):
   - 低并发 (4 线程):  ~10-15% TPS
   - 高并发 (64 线程): ~40-60% TPS
 ```
@@ -735,10 +600,9 @@ DstoreTableHandler::Scan()
 | **A3: BufferDesc 缓存行分离** | +5-10% (NUMA) | 1-2天 | 低 | 无 | ★★★★★ |
 | **A12-lite: 增大 BufTable 分区数** | +10-20% (64核+) | 1天 | 极低 | 无 | ★★★★★ |
 | **A10: SIMD Fingerprint 搜索** | +10-20% 节点搜索 | 1周 | 低 | 无 | ★★★★ |
-| **A4: Optimistic Lock Coupling** | +30-50% (64线程) | 1-2周 | 中 | 无 | ★★★★ |
 | **A9: Adaptive Hash Index** | +15-25% 热点 | 2周 | 中 | 无 | ★★★ |
 | **A14: Pointer Swizzling** | 消除 hash 查找 | 2周 | 中-高 | 无 | ★★★ |
-| **A8: TL Page Cache** | 减少 ~4 次原子操作 | 1周 | 低 | A4 | ★★★ |
+| **A8: TL Page Cache** | 减少 ~4 次原子操作 | 1周 | 中低 | 无 | ★★★ |
 | **A15: CSN 无锁化** | +5-15% (高并发读) | 1-2周 | 中 | 需profiling | ★★★ |
 | **A13: io_uring** | +20-40% (cache miss) | 2-3周 | 中 | 无 | ★★ |
 | A12-full: Per-core Buffer Pool | +60% (128核) | 月级 | 高 | 无 | ★ (长期) |
@@ -753,7 +617,6 @@ Sprint 1 (3-5 天) — 零风险快赢
     预期叠加: +15-30%
 
 Sprint 2 (1-2 周) — 核心架构优化
-├── A4:  Optimistic Lock Coupling  (+30-50% @64线程)
 └── A10: SIMD Fingerprint 搜索    (+10-20% 节点搜索)
     预期叠加: +40-60% @高并发
 
@@ -777,10 +640,10 @@ Sprint 3 (2-3 周) — 高级优化
 | PG `s_lock.h:196` TAS_SPIN + PAUSE | Spinlock 优化参考 |
 
 ### 学术论文与技术文档
-- [FB+-tree: A Memory-Optimized B+-tree with Latch-Free Update (PVLDB 2025)](https://arxiv.org/html/2503.23397v1) — A4/A10 SIMD + latch-free 参考
+- [FB+-tree: A Memory-Optimized B+-tree with Latch-Free Update (PVLDB 2025)](https://arxiv.org/html/2503.23397v1) — A10 SIMD + latch-free 参考
 - ["B-Trees Are Back" (SIGMOD 2025)](https://dl.acm.org/doi/10.1145/3709664) — A10 fingerprint 节点布局参考
-- [LeanStore (VLDB 2018)](https://db.in.tum.de/~leis/papers/leanstore.pdf) — A4 Optimistic lock coupling 理论基础
-- [Umbra (CIDR 2020)](https://db.in.tum.de/~freitag/papers/p29-neumann-cidr20.pdf) — A4/A8 latch-free buffer 管理参考
+- [LeanStore (VLDB 2018)](https://db.in.tum.de/~leis/papers/leanstore.pdf)
+- [Umbra (CIDR 2020)](https://db.in.tum.de/~freitag/papers/p29-neumann-cidr20.pdf) — A8 latch-free buffer 管理参考
 - [ScaleCache (PVLDB 2025)](https://www.vldb.org/pvldb/vol18/p5073-liu.pdf) — A12 per-core buffer pool, 已集成 GaussDB
 - [Evolution of Buffer Management (arXiv 2025)](https://arxiv.org/html/2512.22995v1) — buffer pool 技术综述
 - [InnoDB Adaptive Hash Index — PlanetScale](https://planetscale.com/blog/the-mysql-adaptive-hash-index) — A9 AHI 设计参考
@@ -791,7 +654,6 @@ Sprint 3 (2-3 周) — 高级优化
 - [Percona 2026 MySQL Ecosystem Benchmark](https://www.percona.com/blog/2026-mysql-ecosystem-performance-benchmark-report/) — MySQL vs PG 基准测试
 - [Bf-Tree (PVLDB 2024)](https://badrish.net/papers/bftree-vldb2024.pdf) — B14 mini-page hot fragment cache
 - [EPVS (VLDB Journal 2024)](https://link.springer.com/article/10.1007/s00778-024-00859-8) — B15 epoch-protected metadata
-- [OptiQL (SIGMOD 2024)](https://2024.sigmod.org/toc.html) — B16 high-contention optimistic lock
 - [VEGA (SIGMOD 2025)](https://2025.sigmod.org/toc-3-1.html) — B17 learned upper directory
 - [HugeTLBpage on ARM64](https://docs.kernel.org/6.0/arm64/hugetlbpage.html) — B13 ARM HugePage 参考
 
@@ -861,9 +723,9 @@ Sprint 3 (2-3 周) — 高级优化
 - **代码位置**: `src/index/dstore_btree.cpp:614` (`GetRootFromMetaCache`)
 - **问题**: root cache 当前每次都做较重验证，与 A8 (TL Cache) 不同点在于这是元数据级。
 - **方案**: 发布 `root descriptor + generation`，常态下 reader 仅读 descriptor 且无任何原子写动作；root split/invalidation 时通过 generation 推进让 reader 自然失效再 fallback。
-- **预期收益**: root 路径完全只读化，配合 A4/A8 收益叠加。
+- **预期收益**: root 路径完全只读化，配合 A8 收益叠加。
 - **风险**: 中。需要可靠的 root split / stale cache / invalidation 处理。
-- **工期**: 1 周 (建议与 A4 一同设计)。
+- **工期**: 1 周。
 
 ### 9.2 R4 前沿研究项 (P2/P3)
 
@@ -879,19 +741,13 @@ Sprint 3 (2-3 周) — 高级优化
 - **来源**: Bf-Tree, PVLDB 2024。
 - 比 A9 (AHI) 更细粒度: 缓存的不是 hash entry 而是热叶页的 mini-page 片段 (~256-512 字节)，命中后直接得到完整记录，绕过 leaf page pin。
 - **预期收益**: 热点数据 **+15-30%**。
-- **风险**: 中-高。架构改动较大，建议在 A4/A8/A9 之后再评估。
+- **风险**: 中-高。架构改动较大，建议在 A8/A9 之后再评估。
 - **工期**: 月级。
 
 #### B9: EPVS / Epoch-protected Metadata [P3]
 
 - **来源**: VLDB Journal 2024。
 - 把 reader 的共享写动作 (例如 ref count、stat 计数) 进一步挪出快路径，统一在 epoch 切换时 reconcile。可与 A8 的 TL cache、B6 的 root publication 配合。
-
-#### B10: OptiQL 高争用乐观锁 [P3]
-
-- **来源**: SIGMOD 2024。
-- 在极端并发下 (256+ 线程)，基础 OLC (A4) 仍可能在版本号上自旋。OptiQL 使用 queue-based 等待 + 退避策略，提升热点对象鲁棒性。
-- 适用场景: meta slot、hash bucket、root header。
 
 #### B11: Learned Upper Directory / VEGA [P3]
 
@@ -914,8 +770,7 @@ Sprint 3 (2-3 周) — 高级优化
 |---|---|---|---|---|---|
 | ✅ | A1 | PGO | +8-15% | — | 已完成 |
 | ✅ | A1b | Index-only scan | — | — | 已完成 |
-| **P0** | A4 | OLC B-Tree 读路径 | +30-50% @64线程 | 1-2周 | **首批** |
-| **P0** | A8 | Thread-local Read Cache | 减 ~4 原子操作 | 1周 | 依赖 A4，**首批** |
+| **P0** | A8 | Thread-local Read Cache | 减 ~4 原子操作 | 1周 | **首批** |
 | **P0** | B1 | Snapshot CSN 快路径 | +5-15% | 1-2周 | **首批** |
 | **P0** | B2 | PointGet 专用快路径 | +10-20% | 1-2周 | **首批** |
 | **P0** | A3 | BufferDesc 热冷分离 | +5-10% | 1-2天 | **首批** |
@@ -924,7 +779,7 @@ Sprint 3 (2-3 周) — 高级优化
 | **P0** | A12-lite | BufTable 扩大分区 | +10-20% | 1天 | 纯配置 |
 | **P1** | B4 | Heap 可见性快路径 | +3-8% | 1-2周 | |
 | **P1** | B5 | Unique Int4 比较内核 | +2-5% | 3-5天 | |
-| **P1** | B6 | Root Cache Epoch 发布 | 配合 A4/A8 | 1周 | |
+| **P1** | B6 | Root Cache Epoch 发布 | 配合 A8 | 1周 | |
 | **P1** | A10 | SIMD Fingerprint | +10-20% 节点搜索 | 1周 | |
 | **P1** | A9 | Adaptive Hash Index | +15-25% 热点 | 2周 | 风险中 |
 | **P1** | A14 | Pointer Swizzling | 消除 hash 查找 | 2周 | 风险中-高 |
@@ -932,29 +787,27 @@ Sprint 3 (2-3 周) — 高级优化
 | **P2** | B7 | ARM HugePage | +3-8% | 3-5天 | |
 | **P2** | A13 | io_uring | +20-40% (cache miss) | 2-3周 | |
 | **P2** | B8 | Bf-Tree mini-page | +15-30% | 月级 | |
-| **P3** | B9-B13 | EPVS / OptiQL / VEGA / DPU / RDMA | 长期方向 | — | 不建议短期投入 |
+| **P3** | B9-B13 | EPVS / VEGA / DPU / RDMA | 长期方向 | — | 不建议短期投入 |
 
-### 9.4 Codex 推荐的"首批 5 项"组合
+### 9.4 Codex 推荐的"首批 4 项"组合
 
 codex master plan 第 8 节明确推荐以下组合作为首期落地:
 
-1. **A4** — B-Tree OLC (锁竞争)
-2. **A8** — Thread-local Read Cache (pin/unpin 流量)
-3. **B1** — Snapshot CSN 快路径 (全局快照热点)
-4. **B2** — PointGet 专用快路径 (框架层固定税)
-5. **B3** — Heap Tuple 零拷贝 (tuple copy 成本)
+1. **A8** — Thread-local Read Cache (pin/unpin 流量)
+2. **B1** — Snapshot CSN 快路径 (全局快照热点)
+3. **B2** — PointGet 专用快路径 (框架层固定税)
+4. **B3** — Heap Tuple 零拷贝 (tuple copy 成本)
 
-这 5 项分别命中 5 个独立瓶颈，组合收益预计在 **+50-80% TPS @ 64+ 线程**。本报告完全采纳此组合作为 Phase 2 的核心投入。
+这 4 项分别命中 4 个独立瓶颈，组合收益预计在 **+35-60% TPS @ 64+ 线程**。本报告完全采纳此组合作为 Phase 2 的核心投入。
 
 ### 9.5 与已有 A 系列方案的对应关系
 
 | Codex 项 | 本报告对应 | 关系 |
 |---|---|---|
-| P0-1 OLC | A4 | 同一项，A4 已含详细设计 |
-| P0-2 TL Read Cache | A8 | 同一项 |
-| P0-3 Snapshot CSN 快路径 | B1 | **新增** (R3 代码复核才发现) |
-| P0-4 PointGet 快路径 | B2 | **新增** |
-| P0-5 BufferDesc 热冷分离 | A3 | 同一项 |
+| P0-1 TL Read Cache | A8 | 同一项 |
+| P0-2 Snapshot CSN 快路径 | B1 | **新增** (R3 代码复核才发现) |
+| P0-3 PointGet 快路径 | B2 | **新增** |
+| P0-4 BufferDesc 热冷分离 | A3 | 同一项 |
 | P1-1 Heap 零拷贝 | B3 | **新增** |
 | P1-2 Heap 可见性快路径 | B4 | **新增** (A15 偏 CSN，B4 偏 page hint) |
 | P1-3 Unique Int4 比较 | B5 | **新增** |
@@ -968,7 +821,7 @@ codex master plan 第 8 节明确推荐以下组合作为首期落地:
 
 ---
 
-**结论**: 整合 codex master plan 后，本报告共识别 **A1-A15 + B1-B13 = 28 项** 可落地优化。其中 **首批组合 (A3 + A4 + A8 + A11 + A12-lite + B1 + B2 + B3) 是最高 ROI 路径**，预期累计 TPS 提升 **+60-100% @ 64线程**。后续 P1 的 B4-B6 + A9/A10 是第二波；P2/P3 项为中长期演进方向。
+**结论**: 整合 codex master plan 后，本报告共识别 **A1-A15 + B1-B13 = 28 项** 可落地优化。其中 **首批组合 (A3 + A8 + A11 + A12-lite + B1 + B2 + B3) 是最高 ROI 路径**，预期累计 TPS 提升 **+40-80% @ 64线程**。后续 P1 的 B4-B6 + A9/A10 是第二波；P2/P3 项为中长期演进方向。
 
 ---
 
@@ -994,11 +847,11 @@ codex master plan 第 8 节明确推荐以下组合作为首期落地:
 | # | 文件:行 | 角色 | 所属瓶颈 | 相关优化项 |
 |---|---|---|---|---|
 | H1 | `tests/utilities/src/table_handler.cpp:440,447` | 点查入口 / scan 框架调度 | C3 | B2 |
-| H2 | `src/index/dstore_btree_scan.cpp:2241,2309` | `SearchBtreeFromInternalPage` / `SearchBtree` | C1, C5 | A4, A10, B5 |
-| H3 | `src/index/dstore_btree.cpp:571` | `ReleaseOldGetNewBuf` lock-coupling | C1, C2 | A4, A8, A14 |
+| H2 | `src/index/dstore_btree_scan.cpp:2241,2309` | `SearchBtreeFromInternalPage` / `SearchBtree` | C1, C5 | A8, A10, B5 |
+| H3 | `src/index/dstore_btree.cpp:571` | `ReleaseOldGetNewBuf` lock-coupling | C1, C2 | A8, A14 |
 | H4 | `src/index/dstore_btree.cpp:614` | `GetRootFromMetaCache` | C1 | A8, B6 |
 | H5 | `src/index/dstore_btree.cpp:956,1018` | `CompareNIntKeyWithoutNulls` + 通用比较 | C5 | B5 |
-| H6 | `src/buffer/dstore_buf_mgr.cpp:860,2122` | Buffer read + content lock | C1, C2 | A3, A4, A8, A12-lite |
+| H6 | `src/buffer/dstore_buf_mgr.cpp:860,2122` | Buffer read + content lock | C1, C2 | A3, A8, A12-lite |
 | H7 | `include/buffer/dstore_buf.h:650` | `BufferDesc` (256B 冷热混布) | C2, C5 | A3 |
 | H8 | `include/buffer/dstore_buf_refcount.h` | `BufPrivateRefCount` (8 槽) | C2 | A8 (扩展) |
 | H9 | `src/index/dstore_index_handler.cpp:49` | 通用 IndexHandler scan 流程 | C3 | B2 |
@@ -1009,7 +862,7 @@ codex master plan 第 8 节明确推荐以下组合作为首期落地:
 | H14 | `src/transaction/dstore_csn_mgr.cpp:134` | `m_nextCsn` 读取点 | C1 | B1, A15 |
 
 **观察**:
-1. H2 (`dstore_btree_scan.cpp:2241`) 和 H3 (`ReleaseOldGetNewBuf`) 同时命中 C1 + C2，是 **point_select 最核心的双重瓶颈**，因此 A4 (OLC) 是绝对的 P0。
+1. H2 (`dstore_btree_scan.cpp:2241`) 和 H3 (`ReleaseOldGetNewBuf`) 同时命中 C1 + C2，说明 root/internal page 共享状态仍是 point_select 的核心瓶颈，后续优先通过 TL Read Cache、Root/Meta Epoch 和 PointGet 专用路径降低这部分成本。
 2. H13 + H14 (snapshot/CSN) 是 codex R3 新发现的热点，此前 A 系列未覆盖，B1 是必须补的优化项。
 3. H1 + H9 + H10 (框架层调度) 单独构成 C3 瓶颈类，**只有 B2 (PointGet 专用快路径) 能命中**，其他任何优化都绕不过框架税。
 4. H11 + H12 (Heap fetch) 单独构成 C4 瓶颈类，**只有 B3/B4 能命中**。A1b (Index-only scan) 仅对 `covering index` 场景有效，非 covering 场景仍依赖 B3/B4。
@@ -1023,7 +876,6 @@ codex master plan 第 8 节明确推荐以下组合作为首期落地:
 | A1 PGO | | | | | ✓ |
 | A1b Index-only scan | | | | ✓ | |
 | A3 BufferDesc 分离 | | ~ | | | ✓ |
-| A4 OLC | ✓ | ✓ | | | |
 | A8 TL Read Cache | ✓ | ✓ | | | |
 | A9 AHI | ~ | | ✓ | | |
 | A10 SIMD Fingerprint | | | | | ✓ |
@@ -1043,10 +895,10 @@ codex master plan 第 8 节明确推荐以下组合作为首期落地:
 
 ### 10.4 瓶颈覆盖充分性检查
 
-| 瓶颈 | 是否被首批组合 (A3+A4+A8+A11+A12-lite+B1+B2+B3) 完整覆盖？ |
+| 瓶颈 | 是否被首批组合 (A3+A8+A11+A12-lite+B1+B2+B3) 完整覆盖？ |
 |---|---|
-| **C1 共享读热点** | ✅ A4 (B-Tree) + B1 (CSN) + A12-lite (BufTable) 三点齐下 |
-| **C2 原子操作流量** | ✅ A4 + A8 + A3 (字段布局减少无关 cacheline 污染) |
+| **C1 共享读热点** | ✅ B1 (CSN) + A12-lite (BufTable) 三点齐下 |
+| **C2 原子操作流量** | ✅ A8 + A3 (字段布局减少无关 cacheline 污染) |
 | **C3 框架税** | ✅ B2 独立命中 |
 | **C4 Heap 过重** | ⚠️ 仅 B3 (零拷贝)，缺 B4 (可见性快路径) — **建议 B4 提到首批** |
 | **C5 指令/布局** | ⚠️ 仅 A3 + A11 (PGO+BOLT)，缺 B5 (Unique Int4) — **B5 工期仅 3-5 天，建议加入首批** |
@@ -1063,9 +915,8 @@ Sprint 1 (低风险字段/路径改造 / 1 周)
 └── B5   Unique Int4 专用比较         [命中 C5]
 
 Sprint 2 (核心架构 / 3-4 周)
-├── A4   B-Tree OLC                    [命中 C1+C2]
-├── A8   TL Read Cache (依赖 A4)       [命中 C1+C2]
-├── B6   Root/Meta Epoch (配合 A4)     [命中 C1]
+├── A8   TL Read Cache                 [命中 C1+C2]
+├── B6   Root/Meta Epoch              [命中 C1]
 ├── B1   Snapshot CSN 快路径           [命中 C1]
 ├── B2   PointGet 专路径               [命中 C3]
 ├── B3   Heap Tuple 零拷贝            [命中 C4]
@@ -1078,7 +929,7 @@ Sprint 2 (核心架构 / 3-4 周)
 
 | 被排除 | 理由 | 重新评估条件 |
 |---|---|---|
-| A9 AHI | 与 A4+A8 的收益重叠，且 InnoDB 历史退化风险 | 若 Sprint 2 后 B-Tree 遍历仍是瓶颈 |
+| A9 AHI | 与 A8、PointGet 的收益部分重叠，且 InnoDB 历史退化风险 | 若 Sprint 2 后 B-Tree 遍历仍是瓶颈 |
 | A10 SIMD Fingerprint | 需改 page format，且 B5 已覆盖 sysbench 主场景 | 若业务出现宽节点/长 key 点查 |
 | A14 Pointer Swizzling | 收益与 A8 重叠，unswizzle 复杂度高 | 若 buffer pool hash lookup 仍是 top 3 瓶颈 |
 | A13 io_uring | 纯内存命中场景收益 <5%，投入 2-3 周性价比低 | 若出现数据量超内存的压测场景 |
@@ -1086,15 +937,15 @@ Sprint 2 (核心架构 / 3-4 周)
 | B7 ARM HugePage | 独立收益小 (3-8%)，不与其他项冲突 | 随时可做，作为 Sprint 3 补充 |
 | B8 Bf-Tree, B9-B13 | 架构级 / 前沿研究，月级投入 | 年度规划层面决策 |
 
-### 10.6 与首批 5 项 (codex) 的差异
+### 10.6 与首批 4 项 (codex) 的差异
 
 | 差异 | 本报告调整 | 理由 |
 |---|---|---|
-| 增加 A3 | BufferDesc 分离 1-2 天成本，不加白不加 | 纯字段重排，与 A4 零冲突 |
-| 增加 A8 | 作为 A4 的必然延伸 | A4 版本号已经到位，TL cache 只是应用 |
+| 增加 A3 | BufferDesc 分离 1-2 天成本，不加白不加 | 纯字段重排，与当前路径改造低冲突 |
+| 增加 A8 | 直接降低 pin/unpin 原子流量 | 需要单独明确 generation 或校验信息 |
 | 增加 B4 | C4 类瓶颈仅靠 B3 覆盖不足 | Heap 分支链占 heap 阶段 >30% CPU |
 | 增加 B5 | C5 类瓶颈几乎零成本补强 | 3-5 天工期，收益稳定 2-5% |
-| 增加 B6 | A4 的配套 | 根节点必须纳入 epoch 发布才能真正无锁 |
+| 增加 B6 | Root/Meta 发布式读取 | 降低 root descriptor 共享状态读取成本 |
 | 新增 Sprint 0 (A11 + A12-lite) | 纯构建 / 配置，当天可上 | 不占开发窗口 |
 
 **总结**: 采用本报告扩展后的首批 10 项 (Sprint 0+1+2)，**预期叠加收益 +70-110% TPS @ 64 线程**，且五类核心瓶颈全部被命中，无遗漏盲区。

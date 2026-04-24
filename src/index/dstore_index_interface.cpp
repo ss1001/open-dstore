@@ -457,6 +457,31 @@ RetStatus ScanNext(IndexScanHandler *scanHandler, ScanDirection direction, bool 
     return ret;
 }
 
+RetStatus PointGetUnique(StorageRelation indexRel, IndexInfo *indexInfo, ScanKey skey, Snapshot snapshot,
+                         ItemPointerData *heapCtid)
+{
+    if (unlikely(heapCtid == nullptr || snapshot == nullptr)) {
+        ErrLog(DSTORE_ERROR, MODULE_INDEX, ErrMsg("wrong parameters in PointGetUnique."));
+        storage_set_error(INDEX_ERROR_INPUT_PARAM_WRONG);
+        return DSTORE_FAIL;
+    }
+    *heapCtid = INVALID_ITEM_POINTER;
+
+    if (STORAGE_FUNC_FAIL(IndexRelCheck(indexRel, __FUNCTION__)) ||
+        STORAGE_FUNC_FAIL(IndexInfoCheck(indexInfo, __FUNCTION__)) ||
+        STORAGE_FUNC_FAIL(ParamScanKeyCheck(skey, 1))) {
+        return DSTORE_FAIL;
+    }
+
+    IndexScanHandler scanHandler;
+    if (STORAGE_FUNC_FAIL(scanHandler.InitIndexScanHandler(indexRel, indexInfo, 1, 0))) {
+        return DSTORE_FAIL;
+    }
+    scanHandler.SetStorageRelOid(indexRel->relOid);
+    scanHandler.InitSnapshot(snapshot);
+    return scanHandler.PointGetUnique(skey, heapCtid);
+}
+
 ItemPointer GetResultHeapCtid(IndexScanHandler *scanHandler)
 {
     /* parameters check */

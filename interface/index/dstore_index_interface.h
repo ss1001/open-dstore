@@ -63,6 +63,8 @@ DSTORE::RetStatus Delete(DSTORE::BtreeInsertAndDeleteCommonData commonData);
 DSTORE::IndexScanHandler *ScanBegin(DSTORE::StorageRelation indexRel, DSTORE::IndexInfo *indexInfo,
                                     int numKeys, int numOrderbys, bool showAnyTuples = false);
 DSTORE::RetStatus ScanRescan(DSTORE::IndexScanHandler *scanHandler, DSTORE::ScanKey skey);
+DSTORE::RetStatus PointGetUnique(DSTORE::StorageRelation indexRel, DSTORE::IndexInfo *indexInfo, DSTORE::ScanKey skey,
+                                 DSTORE::Snapshot snapshot, DSTORE::ItemPointerData *heapCtid);
 DSTORE::ScanKey GetScanKeyInfo(DSTORE::IndexScanHandler *scanHandler, int &numberOfKeys);
 DSTORE::RetStatus ResetArrCondInfo(DSTORE::IndexScanHandler *scanHandler, int numKeys, DSTORE::Datum **values,
                                    bool **isnulls, int *numElem);

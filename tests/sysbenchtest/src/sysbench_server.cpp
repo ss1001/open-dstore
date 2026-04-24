@@ -320,6 +320,10 @@ void LoadGucConfig()
         RetStatus ret = TenantConfigInterface::GetTenantConfig(tmpStrValue, g_sysbenchGuc.tenantConfig);
         StorageReleasePanic(STORAGE_FUNC_FAIL(ret), DSTORE::MODULE_FRAMEWORK, ErrMsg("GetTenantConfig fail."));
     }
+    cJSON *item = cJSON_GetObjectItem(configJson, "enablePointGetFastPath");
+    g_sysbenchGuc.SetEnablePointGetFastPath((item != nullptr) ? item->valueint : true);
+    std::cout << "enablePointGetFastPath: " << g_sysbenchGuc.IsPointGetFastPathEnabled() << std::endl;
+
     configFile.close();
     std::cout << "tmpStrValue = " << tmpStrValue << std::endl;
     std::cout << "config.storageConfig.clientLibPath = " << g_sysbenchGuc.tenantConfig->storageConfig.clientLibPath << std::endl;

@@ -112,6 +112,7 @@ public:
     BtreeScan(StorageRelation indexRel, IndexInfo *indexInfo);
     ~BtreeScan() override;
     RetStatus BeginScan(IndexScanDesc scan);
+    RetStatus PointGetUnique(ScanKey scanKey, ItemPointerData *heapCtid);
     RetStatus GetNextTuple(IndexScanDesc scan, ScanDirection dir, bool *found);
     void EndScan();
     RetStatus ReScan(IndexScanDesc scan);
@@ -216,7 +217,6 @@ private:
     RetStatus GetFirstArrCondition(ScanDirection dir);
     bool StepToNextArrCondition(ScanDirection dir);
     int MakeArrPositioningKey(ScanKey skey, int arrKeyIdx, int checkingKeyIdx);
-
     /* Make the scankey to descend to leaf. */
     bool MakePositioningKeys(ScanDirection dir);
     bool ConstructNotNullScanKey(ScanKey notNullKey, ScanKey normalKey, ScanDirection dir) const;

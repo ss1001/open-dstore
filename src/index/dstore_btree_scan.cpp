@@ -85,6 +85,83 @@ RetStatus BtreeScan::BeginScan(IndexScanDesc scan)
     return DSTORE_SUCC;
 }
 
+RetStatus BtreeScan::PointGetUnique(ScanKey scanKey, ItemPointerData *heapCtid)
+{
+    if (unlikely(scanKey == nullptr || heapCtid == nullptr)) {
+        storage_set_error(INDEX_ERROR_INPUT_PARAM_WRONG);
+        ErrLog(DSTORE_ERROR, MODULE_INDEX, ErrMsg("PointGetUnique got invalid input."));
+        return DSTORE_FAIL;
+    }
+    *heapCtid = INVALID_ITEM_POINTER;
+
+    if (!m_indexInfo->isUnique || m_indexInfo->indexKeyAttrsNum != 1 ||
+        m_indexInfo->relKind == static_cast<char>(SYS_RELKIND_GLOBAL_INDEX)) {
+        storage_set_error(INDEX_ERROR_POINTGET_UNSUPPORTED);
+        ErrLog(DSTORE_DEBUG1, MODULE_INDEX,
+               ErrMsg("PointGetUnique unsupported index shape: isUnique:%u, indexKeyAttrsNum:%u, relKind:%d.",
+                      static_cast<unsigned>(m_indexInfo->isUnique),
+                      static_cast<unsigned>(m_indexInfo->indexKeyAttrsNum),
+                      static_cast<int>(m_indexInfo->relKind)));
+        return DSTORE_FAIL;
+    }
+
+    if (IsScanPosValid()) {
+        UnpinScanPosIfPinned();
+        InvalidateScanPos();
+    }
+
+    m_currentStatus.prevMatchedHeapCtid = INVALID_ITEM_POINTER;
+    m_currentStatus.prevMatchedTableOid = DSTORE_INVALID_OID;
+    m_markItemIndex = -1;
+    m_numArrCond = 0;
+    m_keysConflictFlag = false;
+    m_scanKeyIncludeArry = nullptr;
+
+    ScanKeyData processedKey[INDEX_MAX_KEY_NUM] = {};
+    ScanKey processedScanKey = processedKey;
+    ProcessScanKey(scanKey, 1, processedScanKey, m_numberOfKeys, false);
+    if (unlikely(StorageGetErrorCode() == COMMON_ERROR_FUNCTION_RETURN_NULL)) {
+        return DSTORE_FAIL;
+    }
+    if (m_keysConflictFlag || m_numberOfKeys != 1) {
+        return DSTORE_SUCC;
+    }
+
+    DstorePfreeExt(m_scanKeyForCheck);
+    m_scanKeyForCheck = static_cast<ScanKey>(DstorePalloc(sizeof(ScanKeyData) * static_cast<uint>(m_numberOfKeys)));
+    if (unlikely(m_scanKeyForCheck == nullptr)) {
+        ErrLog(DSTORE_ERROR, MODULE_INDEX, ErrMsg("DstorePalloc fail when PointGetUnique."));
+        storage_set_error(INDEX_ERROR_MEMORY_ALLOC);
+        return DSTORE_FAIL;
+    }
+    errno_t rc = memcpy_s(m_scanKeyForCheck, sizeof(ScanKeyData) * static_cast<uint>(m_numberOfKeys),
+                          processedScanKey, sizeof(ScanKeyData) * static_cast<uint>(m_numberOfKeys));
+    storage_securec_check(rc, "\0", "\0");
+    m_uniqueTupleSearch = IsUniqueTupleSearch();
+    if (!m_uniqueTupleSearch) {
+        DstorePfreeExt(m_scanKeyForCheck);
+        storage_set_error(INDEX_ERROR_POINTGET_UNSUPPORTED);
+        ErrLog(DSTORE_DEBUG1, MODULE_INDEX,
+               ErrMsg("PointGetUnique unsupported scan key shape: strategy:%d, flags:%u.",
+                      static_cast<int>(processedScanKey->skStrategy),
+                      static_cast<unsigned>(processedScanKey->skFlags)));
+        return DSTORE_FAIL;
+    }
+
+    IndexScanDescData scanDesc = {};
+    bool found = false;
+    RetStatus status = GetNextTupleInternal(&scanDesc, ScanDirection::FORWARD_SCAN_DIRECTION, &found);
+    if (STORAGE_FUNC_SUCC(status) && found) {
+        *heapCtid = scanDesc.heapCtid;
+    }
+    if (IsScanPosValid()) {
+        UnpinScanPosIfPinned();
+        InvalidateScanPos();
+    }
+    DstorePfreeExt(m_scanKeyForCheck);
+    return status;
+}
+
 RetStatus BtreeScan::ReScan(IndexScanDesc scan)
 {
     /* we should not keep any locks but maybe pinned cr page. unpin it */

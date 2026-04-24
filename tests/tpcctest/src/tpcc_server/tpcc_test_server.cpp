@@ -307,6 +307,10 @@ void LoadGucConfig()
     g_guc.walEachWriteLenghthLimit = std::stoll(tmpStrValue);
     std::cout << "walEachWriteLenghthLimit: " << g_guc.walEachWriteLenghthLimit << std::endl;
 
+    cJSON *item = cJSON_GetObjectItem(configJson, "enablePointGetFastPath");
+    g_guc.SetEnablePointGetFastPath((item != nullptr) ? item->valueint : true);
+    std::cout << "enablePointGetFastPath: " << g_guc.IsPointGetFastPathEnabled() << std::endl;
+
     g_guc.tenantConfig = new TenantConfig;
     assert(g_guc.tenantConfig != nullptr);
     assert(memset_s(g_guc.tenantConfig, sizeof(TenantConfig), 0, sizeof(TenantConfig)) == EOK);

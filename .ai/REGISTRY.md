@@ -19,6 +19,7 @@ Use Git for actual branch state, commit history, remotes, rebase/cherry-pick sta
 
 - Default git publish remote is `ss1001`, not `origin`, unless explicitly requested otherwise.
 - For `feature/sysbench-integrated`, the latest WAL optimization handoff is summarized in `.ai/summaries/2026-04-08-wal-wait-slot-optimization.md`.
+- PointGetUnique follow-up TODO: remove the per-call `IndexScanHandler`/`BtreeScan` construction cost inside `IndexInterface::PointGetUnique()`, and add counters to break down PointGetUnique hits, fallback count, heap fetch time, and B-Tree search time.
 
 ## Status Meanings
 

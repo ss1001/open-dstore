@@ -58,6 +58,7 @@ public:
     RetStatus InitIndexScanHandler(StorageRelation indexRel, IndexInfo* indexInfo, int numKeys, int numOrderbys,
         bool showAnyTuples = false);
     RetStatus BeginScan();
+    RetStatus PointGetUnique(ScanKey skey, ItemPointerData *heapCtid);
 
     RetStatus ReScan(ScanKey skey);
 

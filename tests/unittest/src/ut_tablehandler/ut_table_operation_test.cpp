@@ -21,8 +21,51 @@
 #include "ut_mock/ut_instance_mock.h"
 #include "ut_tablehandler/ut_table.h"
 #include "ut_tablehandler/ut_table_operation.h"
+#include "table_handler.h"
 #include "table_data_generator.h"
+#include "transaction/dstore_transaction_interface.h"
 #include <thread>
+
+static void FillIndexValues(const TableInfo &tableInfo, int rowIdx, int rowNum, Datum *indexValues)
+{
+    for (uint8 colIdx = 0; colIdx < tableInfo.indexDesc->indexAttrNum; ++colIdx) {
+        indexValues[colIdx] = Int32GetDatum((rowIdx * rowNum) + tableInfo.indexDesc->indexCol[colIdx]);
+    }
+}
+
+static int LockTupleForTest(const TableInfo &tableInfo, const char *indexName, Datum *indexValues,
+                            HeapTuple **tuple)
+{
+    DstoreTableHandler *tableHandler = simulator->GetTableHandler(tableInfo.relation.name, indexName);
+    StorageAssert(tableHandler != nullptr);
+    TransactionInterface::StartTrxCommand();
+    TransactionInterface::SetSnapShot();
+    int ret = tableHandler->LockTuple(tableInfo.indexDesc->indexCol, indexValues, tuple,
+                                      tableInfo.indexDesc->indexAttrNum);
+    if (ret == 0) {
+        TransactionInterface::CommitTrxCommand();
+    } else {
+        TransactionInterface::AbortTrx();
+    }
+    delete tableHandler;
+    return ret;
+}
+
+static int DeleteForTest(const TableInfo &tableInfo, const char *indexName, Datum *indexValues)
+{
+    DstoreTableHandler *tableHandler = simulator->GetTableHandler(tableInfo.relation.name, indexName);
+    StorageAssert(tableHandler != nullptr);
+    TransactionInterface::StartTrxCommand();
+    TransactionInterface::SetSnapShot();
+    int ret = tableHandler->Delete(tableInfo.indexDesc->indexCol, indexValues, tableInfo.indexDesc->indexAttrNum);
+    if (ret == 0) {
+        TransactionInterface::CommitTrxCommand();
+    } else {
+        TransactionInterface::AbortTrx();
+    }
+    delete tableHandler;
+    return ret;
+}
 
 void UTTableOperationTest::SetUp()
 {
@@ -291,6 +334,106 @@ TEST_F(UTTableOperationTest, UpdateTest)
         ret = m_utTableOperate->UpdateAndCheck(i, testTupleRowCount);
         EXPECT_EQ(ret, 0);
     }
+}
+
+TEST_F(UTTableOperationTest, LockTuplePointGetUniqueFastPathTest)
+{
+    const int testTupleRowCount = 5;
+    int ret = m_utTableOperate->CreateAllTable();
+    EXPECT_EQ(ret, 0);
+    ret = m_utTableOperate->Insert(TABLE_1, testTupleRowCount);
+    EXPECT_EQ(ret, 0);
+    ret = m_utTableOperate->CreateAllIndex();
+    EXPECT_EQ(ret, 0);
+
+    g_storageInstance->GetGuc()->SetEnablePointGetFastPath(true);
+    TableInfo tableInfo = TABLE_CACHE[TABLE_1];
+    char *indexName =
+        TableDataGenerator::GenerateIndexName(tableInfo.relation.name, tableInfo.indexDesc->indexCol,
+                                              tableInfo.indexDesc->indexAttrNum);
+    Datum indexValues[tableInfo.indexDesc->indexAttrNum];
+    FillIndexValues(tableInfo, 0, testTupleRowCount, indexValues);
+
+    HeapTuple *tuple = nullptr;
+    ret = LockTupleForTest(tableInfo, indexName, indexValues, &tuple);
+    EXPECT_EQ(ret, 0);
+    ASSERT_TRUE(tuple != nullptr);
+    DstorePfreeExt(tuple);
+    DstorePfreeExt(indexName);
+}
+
+TEST_F(UTTableOperationTest, LockTupleMultiColumnUniqueFallbackTest)
+{
+    const int testTupleRowCount = 5;
+    int ret = m_utTableOperate->CreateAllTable();
+    EXPECT_EQ(ret, 0);
+    ret = m_utTableOperate->Insert(TABLE_3, testTupleRowCount);
+    EXPECT_EQ(ret, 0);
+    ret = m_utTableOperate->CreateAllIndex();
+    EXPECT_EQ(ret, 0);
+
+    g_storageInstance->GetGuc()->SetEnablePointGetFastPath(true);
+    TableInfo tableInfo = TABLE_CACHE[TABLE_3];
+    char *indexName =
+        TableDataGenerator::GenerateIndexName(tableInfo.relation.name, tableInfo.indexDesc->indexCol,
+                                              tableInfo.indexDesc->indexAttrNum);
+    Datum indexValues[tableInfo.indexDesc->indexAttrNum];
+    FillIndexValues(tableInfo, 0, testTupleRowCount, indexValues);
+
+    HeapTuple *tuple = nullptr;
+    ret = LockTupleForTest(tableInfo, indexName, indexValues, &tuple);
+    EXPECT_EQ(ret, 0);
+    ASSERT_TRUE(tuple != nullptr);
+    DstorePfreeExt(tuple);
+    DstorePfreeExt(indexName);
+}
+
+TEST_F(UTTableOperationTest, DeletePointGetUniqueFastPathAndMissTest)
+{
+    const int testTupleRowCount = 5;
+    int ret = m_utTableOperate->CreateAllTable();
+    EXPECT_EQ(ret, 0);
+    ret = m_utTableOperate->Insert(TABLE_1, testTupleRowCount);
+    EXPECT_EQ(ret, 0);
+    ret = m_utTableOperate->CreateAllIndex();
+    EXPECT_EQ(ret, 0);
+
+    g_storageInstance->GetGuc()->SetEnablePointGetFastPath(true);
+    TableInfo tableInfo = TABLE_CACHE[TABLE_1];
+    char *indexName =
+        TableDataGenerator::GenerateIndexName(tableInfo.relation.name, tableInfo.indexDesc->indexCol,
+                                              tableInfo.indexDesc->indexAttrNum);
+    Datum indexValues[tableInfo.indexDesc->indexAttrNum];
+    FillIndexValues(tableInfo, 0, testTupleRowCount, indexValues);
+
+    ret = DeleteForTest(tableInfo, indexName, indexValues);
+    EXPECT_EQ(ret, 0);
+    ret = DeleteForTest(tableInfo, indexName, indexValues);
+    EXPECT_EQ(ret, -1);
+    DstorePfreeExt(indexName);
+}
+
+TEST_F(UTTableOperationTest, DeleteMultiColumnUniqueFallbackTest)
+{
+    const int testTupleRowCount = 5;
+    int ret = m_utTableOperate->CreateAllTable();
+    EXPECT_EQ(ret, 0);
+    ret = m_utTableOperate->Insert(TABLE_3, testTupleRowCount);
+    EXPECT_EQ(ret, 0);
+    ret = m_utTableOperate->CreateAllIndex();
+    EXPECT_EQ(ret, 0);
+
+    g_storageInstance->GetGuc()->SetEnablePointGetFastPath(true);
+    TableInfo tableInfo = TABLE_CACHE[TABLE_3];
+    char *indexName =
+        TableDataGenerator::GenerateIndexName(tableInfo.relation.name, tableInfo.indexDesc->indexCol,
+                                              tableInfo.indexDesc->indexAttrNum);
+    Datum indexValues[tableInfo.indexDesc->indexAttrNum];
+    FillIndexValues(tableInfo, 0, testTupleRowCount, indexValues);
+
+    ret = DeleteForTest(tableInfo, indexName, indexValues);
+    EXPECT_EQ(ret, 0);
+    DstorePfreeExt(indexName);
 }
 
 void *InsertDatas(TableNameType type, int rowNum, UTTableOperation *tableOpration)

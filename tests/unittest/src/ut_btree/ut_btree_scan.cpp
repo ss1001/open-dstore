@@ -17,10 +17,13 @@
 #include <gtest/gtest.h>
 #include "heap/dstore_heap_scan.h"
 #include "index/dstore_btree_build.h"
+#include "index/dstore_index_interface.h"
 #include "index/dstore_index_handler.h"
 #include "index/dstore_btree_scan.h"
 #include "ut_btree/ut_btree.h"
 #include "diagnose/dstore_index_diagnose.h"
+#include "errorcode/dstore_index_error_code.h"
+#include "framework/dstore_thread.h"
 
 using namespace DSTORE;
 
@@ -75,6 +78,146 @@ bool IsScanKeyEqual(ScanKey skey1, ScanKey skey2)
         return false;
     }
     return true;
+}
+
+TEST_F(UTBtree, BtreePointGetUniqueMatchesFullScan_level0)
+{
+    int indexCols[] = {2};
+    m_utTableHandler->CreateIndex(indexCols, 1, true);
+
+    DefaultRowDef baseRow = m_utTableHandler->GetDefaultRowDef();
+    for (int i = 1; i <= 16; ++i) {
+        DefaultRowDef row = baseRow;
+        row.column_int32 = i;
+        IndexTuple *indexTuple = InsertSpecificIndexTuple(&row);
+        ASSERT_NE(indexTuple, nullptr);
+        DstorePfreeExt(indexTuple);
+    }
+
+    Transaction *txn = thrd->GetActiveTransaction();
+    txn->Start();
+    txn->SetSnapshotCsn();
+
+    IndexScanHandler indexScan;
+    ASSERT_EQ(indexScan.InitIndexScanHandler(m_utTableHandler->GetIndexRel(), m_utTableHandler->GetIndexInfo(), 1, 0),
+              DSTORE_SUCC);
+    indexScan.InitSnapshot(txn->GetSnapshot());
+    ASSERT_EQ(indexScan.BeginScan(), DSTORE_SUCC);
+
+    HeapScanHandler heapScan(g_storageInstance, thrd, m_utTableHandler->GetTableRel());
+    ASSERT_EQ(heapScan.Begin(txn->GetSnapshot()), DSTORE_SUCC);
+
+    int keysToCheck[] = {1, 7, 16};
+    for (int key : keysToCheck) {
+        ScanKeyData keyInfo[1];
+        g_storageInstance->GetCacheHashMgr()->GenerateScanKey(INT4OID, Int32GetDatum(key), SCAN_ORDER_EQUAL, keyInfo,
+                                                              1);
+
+        ItemPointerData pointGetCtid = INVALID_ITEM_POINTER;
+        ASSERT_EQ(IndexInterface::PointGetUnique(m_utTableHandler->GetIndexRel(), m_utTableHandler->GetIndexInfo(),
+                                                 keyInfo, txn->GetSnapshot(), &pointGetCtid), DSTORE_SUCC);
+        ASSERT_NE(pointGetCtid, INVALID_ITEM_POINTER);
+
+        ASSERT_EQ(indexScan.ReScan(keyInfo), DSTORE_SUCC);
+        bool found = false;
+        bool recheck = false;
+        ASSERT_EQ(IndexInterface::ScanNext(&indexScan, ScanDirection::FORWARD_SCAN_DIRECTION, &found, &recheck),
+                  DSTORE_SUCC);
+        ASSERT_TRUE(found);
+        EXPECT_EQ(*indexScan.GetResultHeapCtid(), pointGetCtid);
+
+        HeapTuple *pointGetTuple = heapScan.FetchTuple(pointGetCtid);
+        ASSERT_NE(pointGetTuple, nullptr);
+        heapScan.EndFetch();
+
+        ItemPointerData fullScanCtid = *indexScan.GetResultHeapCtid();
+        HeapTuple *fullScanTuple = heapScan.FetchTuple(fullScanCtid);
+        ASSERT_NE(fullScanTuple, nullptr);
+        heapScan.EndFetch();
+
+        EXPECT_EQ(pointGetTuple->GetDiskTupleSize(), fullScanTuple->GetDiskTupleSize());
+        EXPECT_EQ(memcmp(pointGetTuple->GetDiskTuple()->GetData(), fullScanTuple->GetDiskTuple()->GetData(),
+                         pointGetTuple->GetDiskTupleSize() - HEAP_DISK_TUP_HEADER_SIZE), 0);
+
+        DstorePfreeExt(pointGetTuple);
+        DstorePfreeExt(fullScanTuple);
+    }
+
+    ScanKeyData missKey[1];
+    g_storageInstance->GetCacheHashMgr()->GenerateScanKey(INT4OID, Int32GetDatum(9999), SCAN_ORDER_EQUAL, missKey, 1);
+    ItemPointerData missCtid = INVALID_ITEM_POINTER;
+    ASSERT_EQ(IndexInterface::PointGetUnique(m_utTableHandler->GetIndexRel(), m_utTableHandler->GetIndexInfo(),
+                                             missKey, txn->GetSnapshot(), &missCtid), DSTORE_SUCC);
+    EXPECT_EQ(missCtid, INVALID_ITEM_POINTER);
+
+    indexScan.EndScan();
+    txn->Commit();
+}
+
+TEST_F(UTBtree, BtreePointGetUniqueRejectNonUniqueIndex_level0)
+{
+    int indexCols[] = {2};
+    m_utTableHandler->CreateIndex(indexCols, 1, false);
+
+    Transaction *txn = thrd->GetActiveTransaction();
+    txn->Start();
+    txn->SetSnapshotCsn();
+
+    ScanKeyData keyInfo[1];
+    g_storageInstance->GetCacheHashMgr()->GenerateScanKey(INT4OID, Int32GetDatum(1), SCAN_ORDER_EQUAL, keyInfo, 1);
+
+    StorageClearError();
+    ItemPointerData pointGetCtid = INVALID_ITEM_POINTER;
+    EXPECT_EQ(IndexInterface::PointGetUnique(m_utTableHandler->GetIndexRel(), m_utTableHandler->GetIndexInfo(),
+                                             keyInfo, txn->GetSnapshot(), &pointGetCtid), DSTORE_FAIL);
+    EXPECT_EQ(StorageGetErrorCode(), INDEX_ERROR_POINTGET_UNSUPPORTED);
+    EXPECT_EQ(pointGetCtid, INVALID_ITEM_POINTER);
+
+    txn->Commit();
+}
+
+TEST_F(UTBtree, BtreePointGetUniqueRejectMultiColumn_level0)
+{
+    int indexCols[] = {1, 2};
+    m_utTableHandler->CreateIndex(indexCols, 2, true);
+
+    Transaction *txn = thrd->GetActiveTransaction();
+    txn->Start();
+    txn->SetSnapshotCsn();
+
+    ScanKeyData keyInfo[1];
+    g_storageInstance->GetCacheHashMgr()->GenerateScanKey(INT2OID, Int16GetDatum(1), SCAN_ORDER_EQUAL, keyInfo, 1);
+
+    StorageClearError();
+    ItemPointerData pointGetCtid = INVALID_ITEM_POINTER;
+    EXPECT_EQ(IndexInterface::PointGetUnique(m_utTableHandler->GetIndexRel(), m_utTableHandler->GetIndexInfo(),
+                                             keyInfo, txn->GetSnapshot(), &pointGetCtid), DSTORE_FAIL);
+    EXPECT_EQ(StorageGetErrorCode(), INDEX_ERROR_POINTGET_UNSUPPORTED);
+    EXPECT_EQ(pointGetCtid, INVALID_ITEM_POINTER);
+
+    txn->Commit();
+}
+
+TEST_F(UTBtree, BtreePointGetUniqueNonEqualScanKey_level0)
+{
+    int indexCols[] = {2};
+    m_utTableHandler->CreateIndex(indexCols, 1, true);
+
+    Transaction *txn = thrd->GetActiveTransaction();
+    txn->Start();
+    txn->SetSnapshotCsn();
+
+    ScanKeyData keyInfo[1];
+    g_storageInstance->GetCacheHashMgr()->GenerateScanKey(INT4OID, Int32GetDatum(1), SCAN_ORDER_GREATER, keyInfo, 1);
+
+    StorageClearError();
+    ItemPointerData pointGetCtid = INVALID_ITEM_POINTER;
+    EXPECT_EQ(IndexInterface::PointGetUnique(m_utTableHandler->GetIndexRel(), m_utTableHandler->GetIndexInfo(),
+                                             keyInfo, txn->GetSnapshot(), &pointGetCtid), DSTORE_FAIL);
+    EXPECT_EQ(StorageGetErrorCode(), INDEX_ERROR_POINTGET_UNSUPPORTED);
+    EXPECT_EQ(pointGetCtid, INVALID_ITEM_POINTER);
+
+    txn->Commit();
 }
 
 int UTBtree::GetSatisfiedTupleNum(IndexScanHandler &indexScan, HeapScanHandler &heapScan, ScanDirection dir, bool checkIndexOnly)

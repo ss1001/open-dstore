@@ -94,6 +94,13 @@ public:
     IndexBuildInfo ConstructBtreeBuilder(StorageRelation heapRel, const TableInfo &indexTableInfo);
 
 private:
+    enum class PointGetHeapCtidStatus : uint8_t {
+        FOUND,
+        MISS,
+        FALLBACK,
+        FAILED
+    };
+
     void OpenDiskTableFile(CommonPersistentHandler *tablePersistentHander, const char *tableName, bool isIndex = false,
                            uint32_t colNum = 0);
     StorageRelation ReadDiskTable(CommonPersistentHandler *tablePersistentHander, const char *path);
@@ -117,6 +124,10 @@ private:
     void GetScanFuncByType(ScanKey scanKey, Oid leftType, Oid rightType);
     static IndexInfo *CreateIndexInfo(int attrNum);
     static IndexInfo *BuildIndexInfo(StorageRelation idxRel, uint16_t keyNum, bool unique);
+    bool CanUsePointGet(uint32_t indexColNum) const;
+    void InitPointGetScanKey(ScanKeyData &scanKey, uint32_t indexColNum, Datum *indexValues);
+    PointGetHeapCtidStatus TryPointGetHeapCtid(Datum *indexValues, uint32_t indexColNum,
+                                               ItemPointerData *heapCtid);
     ScanKey ConstructEqualScanKey(uint32_t indexColNum, Datum *indexValues);
     ScanKey ConstructNormalScanKey(uint32_t indexColNum);
     uint16_t GetIndexKeyNum() const;

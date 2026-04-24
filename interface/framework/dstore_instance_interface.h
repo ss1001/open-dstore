@@ -199,6 +199,43 @@ struct TenantConfig {
 };
 
 struct StorageGUC {
+    /* bits 0-28 store LRU scan depth; bits 29-31 store optimization flags. */
+    static constexpr uint32_t LRU_SCAN_DEPTH_MASK = (1U << 29U) - 1U;
+    static constexpr uint32_t OPT_FLAGS_MASK = 0xE0000000U;
+    static constexpr uint32_t POINT_GET_FAST_PATH_FLAG = 1U << 29U;
+
+    /* Not thread-safe. Modify during init only; concurrent online changes require external synchronization. */
+    inline void SetLruScanDepth(uint32_t scanDepth)
+    {
+        lruScanDepth = (lruScanDepth & OPT_FLAGS_MASK) | (scanDepth & LRU_SCAN_DEPTH_MASK);
+    }
+
+    inline uint32_t GetLruScanDepth() const
+    {
+        return lruScanDepth & LRU_SCAN_DEPTH_MASK;
+    }
+
+    inline void SetEnablePointGetFastPath(bool enabled)
+    {
+        SetOptimizationFlag(POINT_GET_FAST_PATH_FLAG, enabled);
+    }
+
+    inline bool IsPointGetFastPathEnabled() const
+    {
+        return (lruScanDepth & POINT_GET_FAST_PATH_FLAG) != 0;
+    }
+
+private:
+    inline void SetOptimizationFlag(uint32_t flag, bool enabled)
+    {
+        if (enabled) {
+            lruScanDepth |= flag;
+        } else {
+            lruScanDepth &= ~flag;
+        }
+    }
+
+public:
     NodeId selfNodeId;       /* TODO: we may directly get selfNodeId from cluster manager, or change type to NodeId */
     int buffer;              /* buffer size */
     int bufferLruPartition;  /* the number of buffer lru parition */
@@ -292,7 +329,9 @@ struct StorageGUC {
     bool enableStmtTrack;
     bool enableTrackIOTiming;
     double candidateSafePercent;
-    uint32_t lruScanDepth;
+    uint32_t lruScanDepth; /* Packed field. Use GetLruScanDepth() for scan depth and IsPointGetFastPathEnabled() for flags.
+                            * Low bits store LRU scan depth; high bits store optimization flags for StorageGUC ABI compatibility.
+                            */
 };
 
 enum class StorageInstanceType : uint8_t {

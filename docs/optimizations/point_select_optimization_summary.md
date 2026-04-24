@@ -30,7 +30,7 @@
 
 其中：
 
-- 基础报告提供了 `OLC`、`Thread-local Read Cache`、`BufferDesc 热冷分离` 等主线方向
+- 基础报告提供了 `Thread-local Read Cache`、`BufferDesc 热冷分离` 等主线方向
 - 扩展报告补充了 `Pointer Swizzling`、`Buffer Pool 分区化`、编译器与分配器方向
 - 总方案文档结合本地代码进一步补出了 `Snapshot CSN 快路径`、`PointGet 专用路径`、`Heap fast path` 等更贴近当前 dstore 的高优先项
 
@@ -40,65 +40,57 @@
 
 ### P0: 第一优先级，建议先做
 
-1. `B-Tree 读路径 OLC 化`
-2. `Thread-local Read Cache / 私有 pin 缓存`
-3. `Snapshot CSN 快路径化`
-4. `PointGet 专用快速路径`
-5. `BufferDesc 热冷字段分离`
+1. `Thread-local Read Cache / 私有 pin 缓存`
+2. `Snapshot CSN 快路径化`
+3. `PointGet 专用快速路径`
+4. `BufferDesc 热冷字段分离`
 
 ### P1: 第二优先级，建议紧接着做
 
-6. `Heap Tuple 零拷贝 / 延迟物化`
-7. `Heap 可见性极简快路径`
-8. `Unique Int4 Key 专用比较内核`
-9. `Root / Meta Cache Epoch 发布式读取`
-10. `Pointer Swizzling`
+5. `Heap Tuple 零拷贝 / 延迟物化`
+6. `Heap 可见性极简快路径`
+7. `Unique Int4 Key 专用比较内核`
+8. `Root / Meta Cache Epoch 发布式读取`
+9. `Pointer Swizzling`
 
 ### P2: 中期优化
 
-11. `编译器与二进制布局优化`
-12. `现代内存分配器与对象池`
-13. `Buffer Pool 分区化`
-14. `ARM HugePage / TLB 专项优化`
-15. `Mini-page / Hot Fragment Cache`
+10. `编译器与二进制布局优化`
+11. `现代内存分配器与对象池`
+12. `Buffer Pool 分区化`
+13. `ARM HugePage / TLB 专项优化`
+14. `Mini-page / Hot Fragment Cache`
 
 ### P3: 中长期探索
 
-16. `EPVS / Epoch-protected Metadata`
-17. `OptiQL 式高争用乐观锁`
-18. `Learned Upper Directory / VEGA`
-19. `SmartNIC / DPU 卸载点查`
-20. `Zero-sided RDMA / Switch-assisted Fetch`
+15. `EPVS / Epoch-protected Metadata`
+16. `Learned Upper Directory / VEGA`
+17. `SmartNIC / DPU 卸载点查`
+18. `Zero-sided RDMA / Switch-assisted Fetch`
 
 ---
 
-## 4. 最值得优先落地的 5 项
+## 4. 最值得优先落地的 4 项
 
-### 4.1 OLC
-
-- 来源: 基础报告 + 本地代码复核
-- 作用: 去掉 root/internal page 上的共享读锁竞争
-- 价值: 是 point_select 热路径中最核心的结构性优化之一
-
-### 4.2 Thread-local Read Cache
+### 4.1 Thread-local Read Cache
 
 - 来源: 基础报告 + 本地代码复核
 - 作用: 减少 pin/unpin 原子操作与 buffer 共享状态流量
-- 价值: 与 OLC 组合后，读路径会明显更“去原子化”
+- 价值: 直接减少高并发点查中的共享状态写入
 
-### 4.3 Snapshot CSN 快路径
+### 4.2 Snapshot CSN 快路径
 
 - 来源: 本地代码复核
 - 作用: 避免每个只读 query 都去触碰全局 `m_nextCsn`
 - 价值: 对高并发短只读事务尤其关键
 
-### 4.4 PointGet 专用快速路径
+### 4.3 PointGet 专用快速路径
 
 - 来源: 本地代码复核
 - 作用: 绕过 `ScanBegin/ReScan/ScanNext/ScanEnd` 泛型框架
 - 价值: 很适合 sysbench 主键点查模式
 
-### 4.5 Heap fast path
+### 4.4 Heap fast path
 
 - 来源: 本地代码复核 + 扩展报告
 - 包含:
@@ -141,5 +133,5 @@
 
 如果需要一句更偏工程落地的版本：
 
-> 优先做 OLC、TL Read Cache、Snapshot CSN 快路径、PointGet 专用接口、Heap fast path，这五项最有希望在当前代码基础上带来可验证的复合收益。
+> 优先做 TL Read Cache、Snapshot CSN 快路径、PointGet 专用接口、Heap fast path，这四项最有希望在当前代码基础上带来可验证的复合收益。
 

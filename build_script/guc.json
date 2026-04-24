@@ -130,5 +130,7 @@
     "bgWalWriterMinBytes 51200(Byte)": "",
     "bgWalWriterMinBytes": "51200",
     "walEachWriteLenghthLimit 524288(Byte)": "",
-    "walEachWriteLenghthLimit": "524288"
+    "walEachWriteLenghthLimit": "524288",
+    "enablePointGetFastPath true": "",
+    "enablePointGetFastPath": true
 }

@@ -24,6 +24,7 @@
 
 #include "catalog/dstore_fake_type.h"
 #include "catalog/dstore_typecache.h"
+#include "errorcode/dstore_index_error_code.h"
 #include "framework/dstore_pdb.h"
 
 #include "table_data_generator.h"
@@ -444,6 +445,29 @@ int DstoreTableHandler::Scan(__attribute__((__unused__)) uint32_t *colSeq, Datum
     uint16_t keyNum = GetIndexKeyNum();
     indexColNum = DstoreMin(indexColNum, keyNum);
     DSTORE::Snapshot snapshot = thrd->GetActiveTransaction()->GetSnapshot();
+
+    ItemPointerData pointGetHeapCtid = INVALID_ITEM_POINTER;
+    PointGetHeapCtidStatus pointGetStatus = TryPointGetHeapCtid(indexValues, indexColNum, &pointGetHeapCtid);
+    if (pointGetStatus == PointGetHeapCtidStatus::MISS || pointGetStatus == PointGetHeapCtidStatus::FAILED) {
+        return -1;
+    }
+    if (pointGetStatus == PointGetHeapCtidStatus::FOUND) {
+        HeapScanHandler *heapScan = HeapInterface::CreateHeapScanHandler(m_heapRel);
+        if (STORAGE_FUNC_FAIL(HeapInterface::BeginScan(heapScan, snapshot))) {
+            HeapInterface::DestroyHeapScanHandler(heapScan);
+            return -1;
+        }
+
+        *tuple = HeapInterface::FetchTuple(heapScan, pointGetHeapCtid);
+        HeapInterface::EndScan(heapScan);
+        HeapInterface::DestroyHeapScanHandler(heapScan);
+        StorageAssert(*tuple != nullptr);
+        if (unlikely(*tuple == nullptr)) {
+            return -1;
+        }
+        return 0;
+    }
+
     IndexScanHandler *indexScan = IndexInterface::ScanBegin(m_indexRel, m_indexRel->index, indexColNum, 0);
     IndexInterface::IndexScanSetSnapshot(indexScan, snapshot);
 
@@ -468,11 +492,13 @@ int DstoreTableHandler::Scan(__attribute__((__unused__)) uint32_t *colSeq, Datum
     }
 
     *tuple = HeapInterface::FetchTuple(heapScan, *heapCtid);
-    StorageAssert(*tuple != nullptr);
     HeapInterface::EndScan(heapScan);
     HeapInterface::DestroyHeapScanHandler(heapScan);
-
     IndexInterface::ScanEnd(indexScan);
+    StorageAssert(*tuple != nullptr);
+    if (unlikely(*tuple == nullptr)) {
+        return -1;
+    }
     return 0;
 }
 
@@ -481,6 +507,35 @@ int DstoreTableHandler::LockTuple(__attribute__((__unused__)) uint32_t* colSeq, 
     AutoMemCxtSwitch autoMemCxtSwitch(thrd->GetTransactionMemoryContext());
     uint16_t keyNum = GetIndexKeyNum();
     indexColNum = DstoreMin(indexColNum, keyNum);
+
+    ItemPointerData pointGetHeapCtid = INVALID_ITEM_POINTER;
+    PointGetHeapCtidStatus pointGetStatus = TryPointGetHeapCtid(indexValues, indexColNum, &pointGetHeapCtid);
+    if (pointGetStatus == PointGetHeapCtidStatus::MISS || pointGetStatus == PointGetHeapCtidStatus::FAILED) {
+        return -1;
+    }
+    if (pointGetStatus == PointGetHeapCtidStatus::FOUND) {
+        HeapLockTupleContext lockTupContext;
+        lockTupContext.ctid = pointGetHeapCtid;
+        lockTupContext.needRetTup = true;
+        lockTupContext.executedEpq = true;
+        lockTupContext.snapshot = *thrd->GetActiveTransaction()->GetSnapshot();
+        RetStatus ret = HeapInterface::LockUnchangedTuple(m_heapRel, &lockTupContext);
+        if (ret == DSTORE_SUCC) {
+            *tuple = lockTupContext.retTup;
+        } else if (lockTupContext.failureInfo.reason == DSTORE::HeapHandlerFailureReason::UPDATED) {
+            lockTupContext.ctid = lockTupContext.failureInfo.ctid;
+            ret = HeapInterface::LockNewestTuple(m_heapRel, &lockTupContext);
+            StorageAssert(ret == DSTORE_SUCC);
+            *tuple = lockTupContext.retTup;
+            StorageAssert(*tuple != nullptr);
+        } else {
+            printf("LockTuple errcode:%llu, reason:%d, csn:%lu UniqueQueryId:%lu\n", thrd->GetErrorCode(),
+                   static_cast<int>(lockTupContext.failureInfo.reason), thrd->GetSnapShotCsn(),
+                   thrd->GetUniqueQueryId());
+        }
+        TransactionInterface::IncreaseCommandCounter();
+        return ret;
+    }
 
     IndexScanHandler *indexScan = IndexInterface::ScanBegin(m_indexRel, m_indexRel->index, indexColNum, 0);
     IndexInterface::IndexScanSetSnapshot(indexScan, thrd->GetActiveTransaction()->GetSnapshot());
@@ -685,6 +740,43 @@ int DstoreTableHandler::Delete(__attribute__((__unused__)) uint32_t *colSeq, Dat
     AutoMemCxtSwitch autoMemCxtSwitch(thrd->GetTransactionMemoryContext());
     uint16_t keyNum = GetIndexKeyNum();
     indexColNum = DstoreMin(indexColNum, keyNum);
+
+    ItemPointerData pointGetHeapCtid = INVALID_ITEM_POINTER;
+    PointGetHeapCtidStatus pointGetStatus = TryPointGetHeapCtid(indexValues, indexColNum, &pointGetHeapCtid);
+    if (pointGetStatus == PointGetHeapCtidStatus::MISS || pointGetStatus == PointGetHeapCtidStatus::FAILED) {
+        return -1;
+    }
+    if (pointGetStatus == PointGetHeapCtidStatus::FOUND) {
+        HeapDeleteContext deleteContext;
+        deleteContext.ctid = pointGetHeapCtid;
+        deleteContext.needReturnTup = false;
+        deleteContext.snapshot = *thrd->GetActiveTransaction()->GetSnapshot();
+        deleteContext.cid = thrd->GetActiveTransaction()->GetCurCid();
+        deleteContext.executedEpq = true;
+        RetStatus retVal = HeapInterface::Delete(m_heapRel, &deleteContext);
+        if (retVal == DSTORE_FAIL) {
+            return -1;
+        }
+
+        bool deleteIndexNulls[keyNum];
+        for (uint16_t i = 0; i < keyNum; i++) {
+            deleteIndexNulls[i] = false;
+        }
+
+        BtreeInsertAndDeleteCommonData btreeContext;
+        btreeContext.indexRel = m_indexRel;
+        btreeContext.indexInfo = m_indexRel->index;
+        btreeContext.skey = ConstructNormalScanKey(keyNum);
+        btreeContext.values = indexValues;
+        btreeContext.isnull = deleteIndexNulls;
+        btreeContext.heapCtid = &pointGetHeapCtid;
+        retVal = IndexInterface::Delete(btreeContext);
+
+        StorageAssert(retVal == 0);
+        DestroyObject((void**)&btreeContext.skey);
+        TransactionInterface::IncreaseCommandCounter();
+        return retVal;
+    }
 
     IndexScanHandler *indexScan = IndexInterface::ScanBegin(m_indexRel, m_indexRel->index, indexColNum, 0);
     IndexInterface::IndexScanSetSnapshot(indexScan, thrd->GetActiveTransaction()->GetSnapshot());
@@ -898,6 +990,46 @@ ScanKey DstoreTableHandler::ConstructEqualScanKey(uint32_t indexColNum, Datum *i
         keyInfos[i].skAttno     = static_cast<AttrNumber>(i + 1);
     }
     return keyInfos;
+}
+
+bool DstoreTableHandler::CanUsePointGet(uint32_t indexColNum) const
+{
+    return m_indexRel != nullptr && m_indexRel->index != nullptr && m_indexRel->index->isUnique &&
+           m_indexRel->index->indexKeyAttrsNum == 1 && indexColNum == 1;
+}
+
+void DstoreTableHandler::InitPointGetScanKey(ScanKeyData &scanKey, uint32_t indexColNum, Datum *indexValues)
+{
+    StorageAssert(indexColNum == 1);
+    g_storageInstance->GetCacheHashMgr()->GenerateScanKey(m_indexRel->attr->attrs[0]->atttypid, indexValues[0],
+                                                          SCAN_ORDER_EQUAL, &scanKey, 1);
+}
+
+DstoreTableHandler::PointGetHeapCtidStatus DstoreTableHandler::TryPointGetHeapCtid(Datum *indexValues,
+                                                                                   uint32_t indexColNum,
+                                                                                   ItemPointerData *heapCtid)
+{
+    if (heapCtid == nullptr || indexValues == nullptr ||
+        !g_storageInstance->GetGuc()->IsPointGetFastPathEnabled() || !CanUsePointGet(indexColNum)) {
+        return PointGetHeapCtidStatus::FALLBACK;
+    }
+
+    ScanKeyData keyInfo = {};
+    InitPointGetScanKey(keyInfo, indexColNum, indexValues);
+    *heapCtid = INVALID_ITEM_POINTER;
+    DSTORE::Snapshot snapshot = thrd->GetActiveTransaction()->GetSnapshot();
+    StorageClearError();
+    if (STORAGE_FUNC_FAIL(IndexInterface::PointGetUnique(m_indexRel, m_indexRel->index, &keyInfo, snapshot,
+                                                         heapCtid))) {
+        ErrorCode err = StorageGetErrorCode();
+        if (err == INDEX_ERROR_POINTGET_UNSUPPORTED) {
+            StorageClearError();
+            return PointGetHeapCtidStatus::FALLBACK;
+        }
+        return PointGetHeapCtidStatus::FAILED;
+    }
+
+    return *heapCtid == INVALID_ITEM_POINTER ? PointGetHeapCtidStatus::MISS : PointGetHeapCtidStatus::FOUND;
 }
 
 ScanKey DstoreTableHandler::ConstructNormalScanKey(uint32_t indexColNum)

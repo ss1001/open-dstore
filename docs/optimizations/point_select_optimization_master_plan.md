@@ -145,7 +145,6 @@ SnapshotCsn
 Get Stable Snapshot CSN
   -> PointGetUnique(index key)
   -> Read Root Descriptor
-  -> Lock-free / optimistic internal traversal
   -> Get heap ctid
   -> Fast heap page pin
   -> Visible-fast-check
@@ -157,7 +156,7 @@ Get Stable Snapshot CSN
 
 - `Snapshot CSN 快路径化`: 减少每 query 的共享状态读取
 - `PointGet 专用快速路径`: 去掉 `ScanBegin/ReScan/ScanNext/ScanEnd`
-- `OLC + TL Read Cache`: 降低 root/internal 级别锁与 pin/unpin 成本
+- `Thread-local Read Cache`: 降低 root/internal 级别 pin/unpin 与共享状态流量
 - `Heap 可见性快路径`: 避免走完整 MVCC 判断分支链
 - `Heap Tuple 零拷贝`: 避免每次 fetch 都复制完整 tuple
 
@@ -199,7 +198,6 @@ Get Stable Snapshot CSN
 
 | 优先级 | 优化项 | 主要来源 | 是否已在旧文档中出现 | 与 dstore 当前代码直接相关 |
 |---|---|---|---|---|
-| P0 | B-Tree 读路径 OLC 化 | R1 + R3 | 是 | 是 |
 | P0 | Thread-local Read Cache / 私有 pin 缓存 | R1 + R3 | 是 | 是 |
 | P0 | Snapshot CSN 快路径化 | R3 | 否 | 是 |
 | P0 | PointGet 专用快速路径 | R3 | 否 | 是 |
@@ -215,7 +213,6 @@ Get Stable Snapshot CSN
 | P2 | ARM HugePage / TLB 专项优化 | R4 | 否 | 间接相关 |
 | P2 | Mini-page / Hot Fragment Cache | R4 | 否 | 是 |
 | P3 | EPVS / Epoch-protected Metadata | R4 | 否 | 是 |
-| P3 | OptiQL 式高争用乐观锁 | R4 | 否 | 是 |
 | P3 | Learned Upper Directory / VEGA | R4 | 否 | 是 |
 | P3 | SmartNIC / DPU 卸载点查 | R4 | 否 | 否 |
 | P3 | Zero-sided RDMA / Switch Assisted Fetch | R4 | 否 | 否 |
@@ -224,28 +221,7 @@ Get Stable Snapshot CSN
 
 ## 9. 各优化项详细说明
 
-### P0-1. B-Tree 读路径 OLC 化
-
-- 来源:
-  - `R1` 基础优化报告 A4
-  - `R3` 本地代码复核
-- 相关代码:
-  - [`/src/index/dstore_btree_scan.cpp:2241`](/Users/shesong/work/code/dstore/src/index/dstore_btree_scan.cpp#L2241)
-  - [`/src/index/dstore_btree.cpp:571`](/Users/shesong/work/code/dstore/src/index/dstore_btree.cpp#L571)
-- 当前问题:
-  - `SearchBtreeFromInternalPage()` 在 root 和 internal page 上仍然依赖 `LW_SHARED`
-  - 并发读者会集中竞争热点页的锁状态
-- 建议改造:
-  - 在页头引入版本号或变体校验信息
-  - internal page 使用无锁读取 + version validate
-  - 多次失败再 fallback 到悲观路径
-- 预期收益:
-  - 显著降低 root/internal page 锁竞争
-  - 在高并发只读场景通常是第一梯队收益项
-- 风险:
-  - 需要小心页分裂、右移、unlink 等并发一致性
-
-### P0-2. Thread-local Read Cache / 私有 pin 缓存
+### P0-1. Thread-local Read Cache / 私有 pin 缓存
 
 - 来源:
   - `R1` 基础优化报告 A8
@@ -475,18 +451,7 @@ Get Stable Snapshot CSN
 - 建议:
   - 优先应用在 snapshot/metadata/root publication 等元数据结构
 
-### P3-2. OptiQL 式高争用乐观锁
-
-- 来源:
-  - `R4`
-  - 参考资料:
-    - [SIGMOD 2024 OptiQL](https://2024.sigmod.org/toc.html)
-- 作用:
-  - 提升热点锁对象在极端并发下的鲁棒性
-- 建议:
-  - 可用于 meta slot、hash bucket、root header 等热点对象
-
-### P3-3. Learned Upper Directory / VEGA
+### P3-2. Learned Upper Directory / VEGA
 
 - 来源:
   - `R4`
@@ -497,7 +462,7 @@ Get Stable Snapshot CSN
 - 建议:
   - 仅建议做上层目录，不建议直接替换叶层验证逻辑
 
-### P3-4. SmartNIC / DPU 卸载点查
+### P3-3. SmartNIC / DPU 卸载点查
 
 - 来源:
   - `R4`
@@ -508,7 +473,7 @@ Get Stable Snapshot CSN
 - 建议:
   - 仅适合中长期架构演进
 
-### P3-5. Zero-sided RDMA / Switch Assisted Fetch
+### P3-4. Zero-sided RDMA / Switch Assisted Fetch
 
 - 来源:
   - `R4`
@@ -538,7 +503,6 @@ Get Stable Snapshot CSN
 
 综合考虑收益、风险与代码现状，建议按以下顺序推进：
 
-1. B-Tree 读路径 OLC 化
 2. Thread-local Read Cache / 私有 pin 缓存
 3. Snapshot CSN 快路径化
 4. PointGet 专用快速路径
@@ -553,24 +517,22 @@ Get Stable Snapshot CSN
 13. Buffer Pool 分区化
 14. ARM HugePage / TLB 专项优化
 15. Mini-page / Hot Fragment Cache
-16. EPVS / OptiQL / Learned Upper Directory
+16. EPVS / Learned Upper Directory
 17. SmartNIC / DPU / Zero-sided RDMA
 
 ---
 
 ## 12. 建议的首批组合
 
-如果只做第一波、并追求最现实的吞吐提升，建议优先组合以下 5 项：
+如果只做第一波、并追求最现实的吞吐提升，建议优先组合以下 4 项：
 
-1. B-Tree 读路径 OLC 化
-2. Thread-local Read Cache / 私有 pin 缓存
-3. Snapshot CSN 快路径化
-4. PointGet 专用快速路径
-5. Heap Tuple 零拷贝 / 延迟物化
+1. Thread-local Read Cache / 私有 pin 缓存
+2. Snapshot CSN 快路径化
+3. PointGet 专用快速路径
+4. Heap Tuple 零拷贝 / 延迟物化
 
-这 5 项合起来分别命中：
+这 4 项合起来分别命中：
 
-- 锁竞争
 - 原子 pin/unpin 流量
 - snapshot 全局热点
 - 框架层固定税
@@ -591,12 +553,11 @@ Get Stable Snapshot CSN
 - `LLC-load-misses`
 - `dTLB-load-misses`
 - `atomic` 相关热点函数占比
-- root/internal page 锁争用与重试次数
+- root/internal page pin/unpin、cache 命中率与共享状态访问次数
 - `FetchTuple` / `VisibilityCheck` / `ScanBegin` 相关函数占比
 
 其中：
 
-- 做 `OLC` 时重点观察锁争用、重试率、LLC miss
 - 做 `Snapshot CSN` 时重点观察热点 cacheline 与原子/共享读开销
 - 做 `PointGet` 时重点观察 `ScanBegin/ReScan/ScanNext` 等框架函数占比
 - 做 `Heap Tuple 零拷贝` 时重点观察 `memcpy`、内存带宽、cache miss
@@ -610,7 +571,7 @@ Get Stable Snapshot CSN
 
 当前最应该优先处理的核心问题是：
 
-1. Root/internal page 共享锁竞争
+1. Root/internal page pin/unpin 与共享状态访问成本
 2. pin/unpin 与 snapshot 相关共享状态热点
 3. 单键点查仍走泛型 scan 框架
 4. heap fetch 和 tuple materialization 对只读点查仍偏重

@@ -93,6 +93,12 @@ RetStatus IndexScanHandler::BeginScan()
     return m_scan->BeginScan(&m_desc);
 }
 
+RetStatus IndexScanHandler::PointGetUnique(ScanKey skey, ItemPointerData *heapCtid)
+{
+    AutoMemCxtSwitch autoMemCxtSwitch(thrd->m_memoryMgr->GetGroupContext(MEMORY_CONTEXT_QUERY));
+    return m_scan->PointGetUnique(skey, heapCtid);
+}
+
 RetStatus IndexScanHandler::ReScan(ScanKey skey)
 {
     /* step1: Store scankey */
